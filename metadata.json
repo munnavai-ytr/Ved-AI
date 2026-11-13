@@ -1,0 +1,6 @@
+{
+  "name": "Ved",
+  "description": "Minimalist conversational AI chat client supporting Gemini and OpenRouter with streaming responses, local Room history, and encrypted API key storage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

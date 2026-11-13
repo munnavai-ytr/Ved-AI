@@ -1,0 +1,76 @@
+<resources>
+    <string name="app_name">Ved</string>
+
+    <!-- Navigation & General -->
+    <string name="cd_open_drawer">Open chat history</string>
+    <string name="cd_new_chat">New chat</string>
+    <string name="cd_settings">Open settings</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_share_chat">Share conversation</string>
+    <string name="cd_copy_chat">Copy full conversation</string>
+    <string name="cd_send_message">Send message</string>
+    <string name="cd_stop_generation">Stop generating</string>
+    <string name="cd_copy_message">Copy message</string>
+    <string name="cd_regenerate">Regenerate response</string>
+    <string name="cd_toggle_key_visibility">Toggle API key visibility</string>
+    <string name="cd_delete_chat">Delete conversation</string>
+    <string name="cd_refresh_models">Refresh models</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_skip">Skip</string>
+    <string name="onboarding_next">Next</string>
+    <string name="onboarding_get_started">Start chatting</string>
+    <string name="onboarding_slide_1_title">Clarity in every answer</string>
+    <string name="onboarding_slide_1_body">Fast, streaming conversations with clean typography, code blocks, and zero clutter.</string>
+    <string name="onboarding_slide_2_title">Two engines, one workspace</string>
+    <string name="onboarding_slide_2_body">Switch smoothly between Google Gemini and hundreds of OpenRouter models anytime.</string>
+    <string name="onboarding_slide_3_title">Private by default</string>
+    <string name="onboarding_slide_3_body">Your chat history stays in a local Room database and custom API keys are encrypted on-device.</string>
+
+    <!-- Chat -->
+    <string name="chat_input_placeholder">Ask Ved anything…</string>
+    <string name="chat_empty_title">How can I help today?</string>
+    <string name="chat_empty_subtitle">Start a conversation or try one of the prompts below.</string>
+    <string name="chat_missing_key_title">API key needed</string>
+    <string name="chat_missing_key_body">No active %1$s API key found. Add one in Settings to start chatting.</string>
+    <string name="chat_open_settings">Open Settings</string>
+    <string name="chat_drawer_title">Conversations</string>
+    <string name="chat_drawer_empty">No saved conversations yet</string>
+    <string name="chat_new">New chat</string>
+    <string name="chat_deleted">Conversation deleted</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_copied">Copied</string>
+    <string name="action_regenerate">Regenerate</string>
+    <string name="action_share">Share</string>
+    <string name="chat_share_title">Share conversation</string>
+    <string name="chat_copied_full">Full conversation copied</string>
+    <string name="chat_copied_message">Copied to clipboard</string>
+    <string name="chat_stopped">Generation stopped</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_appearance_section">Appearance</string>
+    <string name="settings_theme_system">System</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_engine_section">AI Engine</string>
+    <string name="settings_provider_label">Active provider</string>
+    <string name="settings_model_label">Model</string>
+    <string name="settings_select_model">Select model</string>
+    <string name="settings_search_models">Search OpenRouter models…</string>
+    <string name="settings_loading_models">Fetching OpenRouter models…</string>
+    <string name="settings_models_count">%1$d models available</string>
+    <string name="settings_keys_section">API Keys (Encrypted)</string>
+    <string name="settings_keys_note">Optional local overrides are encrypted via Android Keystore and take priority over build-time secrets.</string>
+    <string name="settings_gemini_key_label">Gemini API Key Override</string>
+    <string name="settings_openrouter_key_label">OpenRouter API Key Override</string>
+    <string name="settings_key_placeholder">Paste key to override…</string>
+    <string name="settings_key_save">Save</string>
+    <string name="settings_key_clear">Clear</string>
+    <string name="settings_key_status_override">Status: Encrypted local override active</string>
+    <string name="settings_key_status_build">Status: Using build-time secret</string>
+    <string name="settings_key_status_missing">Status: Not configured</string>
+    <string name="settings_key_saved">Encrypted key saved</string>
+    <string name="settings_key_cleared">Local override removed</string>
+</resources>
