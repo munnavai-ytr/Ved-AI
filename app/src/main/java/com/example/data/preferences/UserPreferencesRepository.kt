@@ -1,6 +1,7 @@
 package com.example.data.preferences
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -19,6 +20,7 @@ private val Context.vedDataStore: DataStore<Preferences> by preferencesDataStore
 /**
  * Snapshot of persisted user preferences.
  */
+@Immutable
 data class UserPreferences(
   val activeProvider: AiProvider = AiProvider.GEMINI,
   val geminiModel: String = DefaultGeminiModels.first().id,

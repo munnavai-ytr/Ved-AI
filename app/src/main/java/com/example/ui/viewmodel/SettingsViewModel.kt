@@ -12,10 +12,12 @@ import com.example.data.preferences.UserPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.repository.ChatRepository
 import com.example.data.security.KeySource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -27,6 +29,7 @@ data class SettingsUiState(
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
   val geminiModels: List<AiModelInfo> = DefaultGeminiModels,
   val openRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
+  val filteredOpenRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
   val isLoadingOpenRouterModels: Boolean = false,
   val openRouterModelsError: String? = null,
   val modelSearchQuery: String = "",
@@ -40,15 +43,6 @@ data class SettingsUiState(
         AiProvider.GEMINI -> geminiModel
         AiProvider.OPENROUTER -> openRouterModel
       }
-
-  val filteredOpenRouterModels: List<AiModelInfo>
-    get() {
-      val q = modelSearchQuery.trim().lowercase()
-      if (q.isEmpty()) return openRouterModels
-      return openRouterModels.filter {
-        it.name.lowercase().contains(q) || it.id.lowercase().contains(q)
-      }
-    }
 }
 
 /**
@@ -81,12 +75,20 @@ class SettingsViewModel(
 
   private val modelsMetaFlow =
     combine(_openRouterModels, _isLoadingModels, _modelsError, _searchQuery) {
-      models,
-      loading,
-      error,
-      query ->
-      ModelCatalogState(models, loading, error, query)
-    }
+        models,
+        loading,
+        error,
+        query ->
+        val q = query.trim()
+        val filtered =
+          if (q.isEmpty()) models
+          else
+            models.filter {
+              it.name.contains(q, ignoreCase = true) || it.id.contains(q, ignoreCase = true)
+            }
+        ModelCatalogState(models, filtered, loading, error, query)
+      }
+      .flowOn(Dispatchers.Default)
 
   val uiState: StateFlow<SettingsUiState> =
     combine(prefsFlow, modelsMetaFlow, keyStatusesFlow, _feedbackMessage) {
@@ -101,6 +103,7 @@ class SettingsViewModel(
           themeMode = prefs.themeMode,
           geminiModels = DefaultGeminiModels,
           openRouterModels = catalog.models,
+          filteredOpenRouterModels = catalog.filteredModels,
           isLoadingOpenRouterModels = catalog.isLoading,
           openRouterModelsError = catalog.error,
           modelSearchQuery = catalog.query,
@@ -177,6 +180,7 @@ class SettingsViewModel(
 
   private data class ModelCatalogState(
     val models: List<AiModelInfo>,
+    val filteredModels: List<AiModelInfo>,
     val isLoading: Boolean,
     val error: String?,
     val query: String,

@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +16,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -57,6 +57,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -75,9 +76,12 @@ import com.example.data.local.entity.MessageEntity
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
+import com.example.ui.components.StreamingChatMessageItem
 import com.example.ui.components.VedBrandMark
 import com.example.ui.viewmodel.ChatUiEvent
 import com.example.ui.viewmodel.ChatViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 
 private val SuggestedPrompts =
@@ -89,8 +93,8 @@ private val SuggestedPrompts =
   )
 
 /**
- * Primary chat screen with history drawer, streaming markdown messages, suggested prompts,
- * copy/share export, and fixed bottom input bar.
+ * Primary chat screen with history drawer, isolated streaming markdown messages, suggested
+ * prompts, copy/share export, and fixed bottom input bar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -156,26 +160,92 @@ fun ChatScreen(
   val isNearBottom by remember {
     derivedStateOf {
       val layoutInfo = listState.layoutInfo
-      val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-      layoutInfo.totalItemsCount == 0 || lastVisible >= layoutInfo.totalItemsCount - 2
+      val total = layoutInfo.totalItemsCount
+      if (total == 0) return@derivedStateOf true
+      val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+      lastVisible.index >= total - 2
     }
   }
 
+  // Smoothly scroll into view when a new message row is added
   LaunchedEffect(uiState.messages.size) {
     if (uiState.messages.isNotEmpty()) {
       listState.animateScrollToItem(uiState.messages.lastIndex)
     }
   }
 
-  LaunchedEffect(uiState.streamingText) {
-    if (uiState.isGenerating && uiState.messages.isNotEmpty() && isNearBottom) {
-      listState.scrollToItem(uiState.messages.lastIndex)
-    }
+  // Throttled, layout-aware scroll adjustment during active streaming: runs only while
+  // generating, never restarts per token, and only scrolls when the last item actually grows
+  // past the bottom viewport edge while the user is near the bottom.
+  LaunchedEffect(uiState.isGenerating) {
+    if (!uiState.isGenerating) return@LaunchedEffect
+
+    snapshotFlow {
+        val layoutInfo = listState.layoutInfo
+        val total = layoutInfo.totalItemsCount
+        val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
+        if (total == 0 || lastVisible == null) {
+          0
+        } else if (lastVisible.index == total - 1) {
+          (lastVisible.offset + lastVisible.size) - layoutInfo.viewportEndOffset
+        } else if (lastVisible.index == total - 2) {
+          Int.MAX_VALUE
+        } else {
+          0
+        }
+      }
+      .conflate()
+      .collect { overflowPx ->
+        if (isNearBottom && !listState.isScrollInProgress) {
+          if (overflowPx == Int.MAX_VALUE) {
+            val lastIdx = listState.layoutInfo.totalItemsCount - 1
+            if (lastIdx >= 0) {
+              listState.scrollToItem(lastIdx)
+            }
+          } else if (overflowPx > 6) {
+            listState.scrollBy(overflowPx.toFloat())
+          }
+        }
+        // Cap auto-scroll adjustments to ~5 Hz so layout passes stay smooth on low-end devices.
+        delay(180L)
+      }
   }
 
   val lastAssistantIndex =
     remember(uiState.messages) {
       uiState.messages.indexOfLast { it.role == MessageEntity.ROLE_ASSISTANT }
+    }
+
+  val activeModelChipText =
+    remember(uiState.activeModelId) { uiState.activeModelId.substringAfterLast('/') }
+
+  val onRegenerate = remember(viewModel) { { viewModel.regenerateLastResponse() } }
+  val onSend = remember(viewModel) { { viewModel.sendMessage() } }
+  val onStop = remember(viewModel) { { viewModel.stopGeneration() } }
+  val onSelectConversation =
+    remember(viewModel, scope, drawerState) {
+      { id: String ->
+        viewModel.selectConversation(id)
+        scope.launch { drawerState.close() }
+        Unit
+      }
+    }
+  val onDeleteConversation =
+    remember(viewModel) { { id: String -> viewModel.deleteConversation(id) } }
+  val onDrawerNewChat =
+    remember(viewModel, scope, drawerState) {
+      {
+        viewModel.startNewChat()
+        scope.launch { drawerState.close() }
+        Unit
+      }
+    }
+  val onDrawerOpenSettings =
+    remember(scope, drawerState, onOpenSettings) {
+      {
+        scope.launch { drawerState.close() }
+        onOpenSettings()
+      }
     }
 
   ModalNavigationDrawer(
@@ -184,19 +254,10 @@ fun ChatScreen(
       ChatDrawerContent(
         conversations = uiState.conversations,
         activeConversationId = uiState.activeConversationId,
-        onSelectConversation = { id ->
-          viewModel.selectConversation(id)
-          scope.launch { drawerState.close() }
-        },
-        onDeleteConversation = { id -> viewModel.deleteConversation(id) },
-        onNewChat = {
-          viewModel.startNewChat()
-          scope.launch { drawerState.close() }
-        },
-        onOpenSettings = {
-          scope.launch { drawerState.close() }
-          onOpenSettings()
-        },
+        onSelectConversation = onSelectConversation,
+        onDeleteConversation = onDeleteConversation,
+        onNewChat = onDrawerNewChat,
+        onOpenSettings = onDrawerOpenSettings,
       )
     },
     modifier = modifier,
@@ -236,7 +297,7 @@ fun ChatScreen(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
               ) {
                 Text(
-                  text = uiState.activeModelId.substringAfterLast('/'),
+                  text = activeModelChipText,
                   style = MaterialTheme.typography.labelLarge,
                   color = MaterialTheme.colorScheme.onSurface,
                   maxLines = 1,
@@ -344,17 +405,22 @@ fun ChatScreen(
                 key = { _, msg -> msg.id },
                 contentType = { _, msg -> msg.role },
               ) { index, message ->
-                val isCurrentlyStreaming = message.id == uiState.streamingMessageId
-                val contentToDisplay =
-                  if (isCurrentlyStreaming) uiState.streamingText else message.content
-
-                ChatMessageItem(
-                  message = message,
-                  displayContent = contentToDisplay,
-                  isStreaming = isCurrentlyStreaming,
-                  isLastAssistantMessage = index == lastAssistantIndex,
-                  onRegenerate = { viewModel.regenerateLastResponse() },
-                )
+                if (message.id == uiState.streamingMessageId) {
+                  StreamingChatMessageItem(
+                    message = message,
+                    streamingTextFlow = viewModel.streamingText,
+                    isLastAssistantMessage = index == lastAssistantIndex,
+                    onRegenerate = onRegenerate,
+                  )
+                } else {
+                  ChatMessageItem(
+                    message = message,
+                    displayContent = message.content,
+                    isStreaming = false,
+                    isLastAssistantMessage = index == lastAssistantIndex,
+                    onRegenerate = onRegenerate,
+                  )
+                }
               }
             }
           }
@@ -364,8 +430,8 @@ fun ChatScreen(
           text = inputText,
           onTextChange = viewModel::onInputChanged,
           isGenerating = uiState.isGenerating,
-          onSend = { viewModel.sendMessage() },
-          onStop = { viewModel.stopGeneration() },
+          onSend = onSend,
+          onStop = onStop,
         )
       }
     }

@@ -36,10 +36,35 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.entity.MessageEntity
 import com.example.ui.theme.LocalVedColors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * Narrow-scope wrapper for the currently streaming assistant message so collecting
+ * [streamingTextFlow] only recomposes this single item rather than the parent LazyColumn.
+ */
+@Composable
+fun StreamingChatMessageItem(
+  message: MessageEntity,
+  streamingTextFlow: StateFlow<String>,
+  isLastAssistantMessage: Boolean,
+  onRegenerate: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val streamedText by streamingTextFlow.collectAsStateWithLifecycle()
+  ChatMessageItem(
+    message = message,
+    displayContent = streamedText,
+    isStreaming = true,
+    isLastAssistantMessage = isLastAssistantMessage,
+    onRegenerate = onRegenerate,
+    modifier = modifier,
+  )
+}
 
 /**
  * Renders a single user or assistant chat turn with markdown, copy, and regenerate controls.
@@ -110,6 +135,7 @@ private fun AssistantMessageBlock(
   val clipboard = LocalClipboardManager.current
   val haptic = LocalHapticFeedback.current
   var copied by remember { mutableStateOf(false) }
+  val modelDisplayName = remember(modelId) { modelId?.substringAfterLast('/') }
 
   LaunchedEffect(copied) {
     if (copied) {
@@ -136,9 +162,9 @@ private fun AssistantMessageBlock(
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurface,
       )
-      if (!modelId.isNullOrBlank()) {
+      if (!modelDisplayName.isNullOrBlank()) {
         Text(
-          text = modelId.substringAfterLast('/'),
+          text = modelDisplayName,
           style = MaterialTheme.typography.labelSmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

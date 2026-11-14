@@ -25,8 +25,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -52,22 +54,309 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.LocalVedColors
 import kotlinx.coroutines.delay
 
-private sealed interface MarkdownBlock {
-  data class Paragraph(val text: String) : MarkdownBlock
+@Immutable
+internal sealed interface MarkdownBlock {
+  @Immutable data class Paragraph(val text: String) : MarkdownBlock
 
-  data class Heading(val level: Int, val text: String) : MarkdownBlock
+  @Immutable data class Heading(val level: Int, val text: String) : MarkdownBlock
 
-  data class CodeBlock(val language: String, val code: String) : MarkdownBlock
+  @Immutable data class CodeBlock(val language: String, val code: String) : MarkdownBlock
 
-  data class BulletItem(val text: String) : MarkdownBlock
+  @Immutable data class BulletItem(val text: String) : MarkdownBlock
 
-  data class OrderedItem(val number: String, val text: String) : MarkdownBlock
+  @Immutable data class OrderedItem(val number: String, val text: String) : MarkdownBlock
 
-  data class BlockQuote(val text: String) : MarkdownBlock
+  @Immutable data class BlockQuote(val text: String) : MarkdownBlock
+}
+
+@Immutable
+internal data class IncrementalParseResult(
+  val settledCount: Int,
+  val blocks: List<MarkdownBlock>,
+)
+
+/**
+ * Incremental markdown block parser that caches settled blocks across append-only streaming
+ * updates so parsing cost per frame scales with newly appended text only, not total length.
+ */
+internal class IncrementalMarkdownParser {
+  private val settledBlocks = ArrayList<MarkdownBlock>()
+  private var settledPrefix: String = ""
+  private var settledLength: Int = 0
+  private var lastInput: String? = null
+  private var lastResult: IncrementalParseResult = IncrementalParseResult(0, emptyList())
+
+  // Tracks how many times settled blocks were parsed/emitted (exposed for unit verification)
+  internal var lastScannedOffset: Int = 0
+    private set
+
+  fun parse(input: String): IncrementalParseResult {
+    if (input === lastInput) return lastResult
+    if (input.isEmpty()) {
+      reset()
+      lastInput = input
+      lastResult = IncrementalParseResult(0, emptyList())
+      return lastResult
+    }
+
+    val canResume =
+      settledLength == 0 ||
+        (input.length >= settledLength && input.regionMatches(0, settledPrefix, 0, settledLength))
+    if (!canResume) {
+      reset()
+    }
+
+    lastScannedOffset = settledLength
+    val trailingBlocks = parseFromOffset(input, settledLength)
+
+    val combined = ArrayList<MarkdownBlock>(settledBlocks.size + trailingBlocks.size)
+    combined.addAll(settledBlocks)
+    combined.addAll(trailingBlocks)
+
+    lastInput = input
+    lastResult = IncrementalParseResult(settledCount = settledBlocks.size, blocks = combined)
+    return lastResult
+  }
+
+  private fun reset() {
+    settledBlocks.clear()
+    settledPrefix = ""
+    settledLength = 0
+    lastScannedOffset = 0
+  }
+
+  private fun parseFromOffset(input: String, startOffset: Int): List<MarkdownBlock> {
+    val trailing = ArrayList<MarkdownBlock>(4)
+    val len = input.length
+    var pos = startOffset
+
+    var openParaStart = -1
+    val paraBuffer = StringBuilder()
+
+    fun flushOpenParagraph(settleOffset: Int, settle: Boolean) {
+      if (paraBuffer.isEmpty()) {
+        openParaStart = -1
+        return
+      }
+      val text = paraBuffer.toString().trim()
+      paraBuffer.clear()
+      if (text.isNotEmpty()) {
+        val block = MarkdownBlock.Paragraph(text)
+        if (settle) {
+          settledBlocks.add(block)
+          settledLength = settleOffset
+          settledPrefix = input
+        } else {
+          trailing.add(block)
+        }
+      } else if (settle) {
+        settledLength = settleOffset
+        settledPrefix = input
+      }
+      openParaStart = -1
+    }
+
+    while (pos < len) {
+      val nlIndex = input.indexOf('\n', pos)
+      val hasNewline = nlIndex != -1
+      val rawLineEnd = if (hasNewline) nlIndex else len
+      val lineEnd =
+        if (rawLineEnd > pos && input[rawLineEnd - 1] == '\r') rawLineEnd - 1 else rawLineEnd
+      val nextLineStart = if (hasNewline) nlIndex + 1 else len
+
+      val trimmedStart = skipLeadingWhitespace(input, pos, lineEnd)
+      val isBlankLine = trimmedStart >= lineEnd
+
+      // 1. Fenced code block ```...```
+      if (!isBlankLine && startsWithFence(input, trimmedStart, lineEnd)) {
+        // Any preceding paragraph is now definitely closed by this code block.
+        flushOpenParagraph(settleOffset = pos, settle = true)
+
+        val fenceStartOffset = pos
+        val lang = input.substring(trimmedStart + 3, lineEnd).trim()
+        val codeBuilder = StringBuilder()
+        var scanPos = nextLineStart
+        var closed = false
+        var afterFencePos = len
+
+        while (scanPos < len) {
+          val codeNl = input.indexOf('\n', scanPos)
+          val codeHasNl = codeNl != -1
+          val codeRawEnd = if (codeHasNl) codeNl else len
+          val codeLineEnd =
+            if (codeRawEnd > scanPos && input[codeRawEnd - 1] == '\r') codeRawEnd - 1
+            else codeRawEnd
+          val codeTrimStart = skipLeadingWhitespace(input, scanPos, codeLineEnd)
+          val codeNextStart = if (codeHasNl) codeNl + 1 else len
+
+          if (startsWithFence(input, codeTrimStart, codeLineEnd)) {
+            if (codeHasNl) {
+              closed = true
+              afterFencePos = codeNextStart
+            } else {
+              // Closing fence has no trailing newline yet; keep in trailing until newline confirms.
+              afterFencePos = codeNextStart
+            }
+            break
+          }
+
+          if (codeBuilder.isNotEmpty()) {
+            codeBuilder.append('\n')
+          }
+          codeBuilder.append(input, scanPos, codeLineEnd)
+          scanPos = codeNextStart
+        }
+
+        val codeBlock = MarkdownBlock.CodeBlock(language = lang, code = codeBuilder.toString())
+        if (closed) {
+          settledBlocks.add(codeBlock)
+          settledLength = afterFencePos
+          settledPrefix = input
+          pos = afterFencePos
+          continue
+        } else {
+          trailing.add(codeBlock)
+          // Do not advance settledLength past fenceStartOffset because fence is still unclosed.
+          settledLength = minOf(settledLength, fenceStartOffset)
+          return trailing
+        }
+      }
+
+      // 2. Blank line
+      if (isBlankLine) {
+        if (paraBuffer.isNotEmpty()) {
+          flushOpenParagraph(settleOffset = nextLineStart, settle = hasNewline)
+        } else if (hasNewline && openParaStart == -1 && trailing.isEmpty()) {
+          settledLength = nextLineStart
+          settledPrefix = input
+        }
+        pos = nextLineStart
+        continue
+      }
+
+      // 3. Heading (#, ##, ###)
+      val headingEnd = parseHeadingPrefixEnd(input, trimmedStart, lineEnd)
+      if (headingEnd > 0) {
+        flushOpenParagraph(settleOffset = pos, settle = true)
+        val level = (headingEnd - trimmedStart).coerceIn(1, 3)
+        val headingText = input.substring(headingEnd, lineEnd).trim()
+        val block = MarkdownBlock.Heading(level = level, text = headingText)
+        if (hasNewline && trailing.isEmpty()) {
+          settledBlocks.add(block)
+          settledLength = nextLineStart
+          settledPrefix = input
+        } else {
+          trailing.add(block)
+        }
+        pos = nextLineStart
+        continue
+      }
+
+      // 4. Blockquote (> )
+      if (trimmedStart + 1 < lineEnd && input[trimmedStart] == '>' && input[trimmedStart + 1] == ' ') {
+        flushOpenParagraph(settleOffset = pos, settle = true)
+        val quoteText = input.substring(trimmedStart + 2, lineEnd).trim()
+        val block = MarkdownBlock.BlockQuote(quoteText)
+        if (hasNewline && trailing.isEmpty()) {
+          settledBlocks.add(block)
+          settledLength = nextLineStart
+          settledPrefix = input
+        } else {
+          trailing.add(block)
+        }
+        pos = nextLineStart
+        continue
+      }
+
+      // 5. Unordered list item (- or * followed by space)
+      if (
+        trimmedStart + 1 < lineEnd &&
+          (input[trimmedStart] == '-' || input[trimmedStart] == '*') &&
+          input[trimmedStart + 1] == ' '
+      ) {
+        flushOpenParagraph(settleOffset = pos, settle = true)
+        val itemText = input.substring(trimmedStart + 2, lineEnd).trim()
+        val block = MarkdownBlock.BulletItem(itemText)
+        if (hasNewline && trailing.isEmpty()) {
+          settledBlocks.add(block)
+          settledLength = nextLineStart
+          settledPrefix = input
+        } else {
+          trailing.add(block)
+        }
+        pos = nextLineStart
+        continue
+      }
+
+      // 6. Ordered list item (digits + ". ")
+      val orderedSplit = parseOrderedListPrefixEnd(input, trimmedStart, lineEnd)
+      if (orderedSplit != null) {
+        flushOpenParagraph(settleOffset = pos, settle = true)
+        val (numEnd, textStart) = orderedSplit
+        val block =
+          MarkdownBlock.OrderedItem(
+            number = input.substring(trimmedStart, numEnd),
+            text = input.substring(textStart, lineEnd).trim(),
+          )
+        if (hasNewline && trailing.isEmpty()) {
+          settledBlocks.add(block)
+          settledLength = nextLineStart
+          settledPrefix = input
+        } else {
+          trailing.add(block)
+        }
+        pos = nextLineStart
+        continue
+      }
+
+      // 7. Paragraph continuation
+      if (openParaStart == -1) {
+        openParaStart = pos
+      }
+      if (paraBuffer.isNotEmpty()) {
+        paraBuffer.append('\n')
+      }
+      paraBuffer.append(input, pos, lineEnd)
+      pos = nextLineStart
+    }
+
+    flushOpenParagraph(settleOffset = len, settle = false)
+    return trailing
+  }
+}
+
+private fun skipLeadingWhitespace(s: String, start: Int, end: Int): Int {
+  var i = start
+  while (i < end && (s[i] == ' ' || s[i] == '\t')) i++
+  return i
+}
+
+private fun startsWithFence(s: String, start: Int, end: Int): Boolean =
+  start + 2 < end && s[start] == '`' && s[start + 1] == '`' && s[start + 2] == '`'
+
+private fun parseHeadingPrefixEnd(s: String, start: Int, end: Int): Int {
+  var i = start
+  var hashes = 0
+  while (i < end && s[i] == '#' && hashes < 6) {
+    hashes++
+    i++
+  }
+  if (hashes == 0 || i >= end || (s[i] != ' ' && s[i] != '\t')) return -1
+  return i
+}
+
+private fun parseOrderedListPrefixEnd(s: String, start: Int, end: Int): Pair<Int, Int>? {
+  var i = start
+  while (i < end && s[i] in '0'..'9') i++
+  if (i == start || i + 1 >= end) return null
+  if (s[i] == '.' && s[i + 1] == ' ') {
+    return i to (i + 2)
+  }
+  return null
 }
 
 /**
- * Lightweight, allocation-conscious Markdown renderer supporting headings, bold, italic,
+ * Lightweight, incremental Markdown renderer supporting headings, bold, italic,
  * strikethrough, inline code, fenced code blocks with copy action, lists, and blockquotes.
  */
 @Composable
@@ -77,7 +366,9 @@ fun MarkdownText(
   textColor: Color = MaterialTheme.colorScheme.onSurface,
   isStreaming: Boolean = false,
 ) {
-  val blocks = remember(markdown) { parseMarkdownBlocks(markdown) }
+  val parser = remember { IncrementalMarkdownParser() }
+  val parsed = parser.parse(markdown)
+  val blocks = parsed.blocks
   val codeBg = LocalVedColors.current.codeBackground
   val accentColor = MaterialTheme.colorScheme.primary
 
@@ -85,88 +376,119 @@ fun MarkdownText(
     modifier = modifier,
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
+    val lastIndex = blocks.lastIndex
     blocks.forEachIndexed { index, block ->
-      val appendCursor = isStreaming && index == blocks.lastIndex
-      when (block) {
-        is MarkdownBlock.Heading -> {
-          val style =
-            when (block.level) {
-              1 -> MaterialTheme.typography.titleLarge
-              2 -> MaterialTheme.typography.titleMedium
-              else -> MaterialTheme.typography.titleSmall
-            }
-          Text(
-            text = formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor),
-            style = style,
-            color = textColor,
-          )
-        }
-        is MarkdownBlock.Paragraph -> {
-          Text(
-            text = formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor),
-            style = MaterialTheme.typography.bodyLarge,
-            color = textColor,
-          )
-        }
-        is MarkdownBlock.BulletItem -> {
-          Row(modifier = Modifier.fillMaxWidth()) {
-            Text(
-              text = "•",
-              style = MaterialTheme.typography.bodyLarge,
-              color = accentColor,
-              modifier = Modifier.padding(end = 10.dp),
-            )
-            Text(
-              text = formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor),
-              style = MaterialTheme.typography.bodyLarge,
-              color = textColor,
-              modifier = Modifier.weight(1f),
-            )
-          }
-        }
-        is MarkdownBlock.OrderedItem -> {
-          Row(modifier = Modifier.fillMaxWidth()) {
-            Text(
-              text = "${block.number}.",
-              style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
-              color = accentColor,
-              modifier = Modifier.padding(end = 8.dp),
-            )
-            Text(
-              text = formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor),
-              style = MaterialTheme.typography.bodyLarge,
-              color = textColor,
-              modifier = Modifier.weight(1f),
-            )
-          }
-        }
-        is MarkdownBlock.BlockQuote -> {
-          Row(
-            modifier =
-              Modifier.fillMaxWidth()
-                .height(IntrinsicSize.Min)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .padding(end = 12.dp, top = 8.dp, bottom = 8.dp)
-          ) {
-            Box(
-              modifier =
-                Modifier.width(3.dp)
-                  .fillMaxHeight()
-                  .background(accentColor)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Text(
-              text = formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor),
-              style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-          }
-        }
-        is MarkdownBlock.CodeBlock -> {
-          CodeBlockCard(language = block.language, code = block.code)
-        }
+      val appendCursor = isStreaming && index == lastIndex
+      key(index) {
+        MarkdownBlockItem(
+          block = block,
+          textColor = textColor,
+          codeBg = codeBg,
+          accentColor = accentColor,
+          appendCursor = appendCursor,
+        )
       }
+    }
+  }
+}
+
+@Composable
+private fun MarkdownBlockItem(
+  block: MarkdownBlock,
+  textColor: Color,
+  codeBg: Color,
+  accentColor: Color,
+  appendCursor: Boolean,
+) {
+  when (block) {
+    is MarkdownBlock.Heading -> {
+      val style =
+        when (block.level) {
+          1 -> MaterialTheme.typography.titleLarge
+          2 -> MaterialTheme.typography.titleMedium
+          else -> MaterialTheme.typography.titleSmall
+        }
+      val annotated =
+        remember(block.text, codeBg, accentColor, appendCursor) {
+          formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor)
+        }
+      Text(text = annotated, style = style, color = textColor)
+    }
+    is MarkdownBlock.Paragraph -> {
+      val annotated =
+        remember(block.text, codeBg, accentColor, appendCursor) {
+          formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor)
+        }
+      Text(
+        text = annotated,
+        style = MaterialTheme.typography.bodyLarge,
+        color = textColor,
+      )
+    }
+    is MarkdownBlock.BulletItem -> {
+      val annotated =
+        remember(block.text, codeBg, accentColor, appendCursor) {
+          formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor)
+        }
+      Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+          text = "•",
+          style = MaterialTheme.typography.bodyLarge,
+          color = accentColor,
+          modifier = Modifier.padding(end = 10.dp),
+        )
+        Text(
+          text = annotated,
+          style = MaterialTheme.typography.bodyLarge,
+          color = textColor,
+          modifier = Modifier.weight(1f),
+        )
+      }
+    }
+    is MarkdownBlock.OrderedItem -> {
+      val annotated =
+        remember(block.text, codeBg, accentColor, appendCursor) {
+          formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor)
+        }
+      Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+          text = "${block.number}.",
+          style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+          color = accentColor,
+          modifier = Modifier.padding(end = 8.dp),
+        )
+        Text(
+          text = annotated,
+          style = MaterialTheme.typography.bodyLarge,
+          color = textColor,
+          modifier = Modifier.weight(1f),
+        )
+      }
+    }
+    is MarkdownBlock.BlockQuote -> {
+      val annotated =
+        remember(block.text, codeBg, accentColor, appendCursor) {
+          formatInlineMarkdown(block.text, codeBg, accentColor, appendCursor)
+        }
+      Row(
+        modifier =
+          Modifier.fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .padding(end = 12.dp, top = 8.dp, bottom = 8.dp)
+      ) {
+        Box(modifier = Modifier.width(3.dp).fillMaxHeight().background(accentColor))
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+          text = annotated,
+          style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+    is MarkdownBlock.CodeBlock -> {
+      CodeBlockCard(language = block.language, code = block.code)
     }
   }
 }
@@ -243,99 +565,6 @@ private fun CodeBlockCard(language: String, code: String) {
   }
 }
 
-private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
-  if (input.isEmpty()) return emptyList()
-  val lines = input.replace("\r\n", "\n").split('\n')
-  val blocks = ArrayList<MarkdownBlock>(lines.size / 2 + 1)
-
-  var i = 0
-  val paragraphBuffer = StringBuilder()
-
-  fun flushParagraph() {
-    val text = paragraphBuffer.toString().trim()
-    if (text.isNotEmpty()) {
-      blocks.add(MarkdownBlock.Paragraph(text))
-    }
-    paragraphBuffer.clear()
-  }
-
-  while (i < lines.size) {
-    val line = lines[i]
-    val trimmed = line.trimStart()
-
-    // Fenced code block (handles unclosed fences smoothly during streaming)
-    if (trimmed.startsWith("```")) {
-      flushParagraph()
-      val lang = trimmed.removePrefix("```").trim()
-      val codeLines = StringBuilder()
-      i++
-      while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
-        if (codeLines.isNotEmpty()) codeLines.append('\n')
-        codeLines.append(lines[i])
-        i++
-      }
-      blocks.add(MarkdownBlock.CodeBlock(language = lang, code = codeLines.toString()))
-      i++
-      continue
-    }
-
-    if (trimmed.isBlank()) {
-      flushParagraph()
-      i++
-      continue
-    }
-
-    // Headings (#, ##, ###)
-    val headingMatch = HEADING_REGEX.matchEntire(trimmed)
-    if (headingMatch != null) {
-      flushParagraph()
-      val level = headingMatch.groupValues[1].length.coerceIn(1, 3)
-      blocks.add(MarkdownBlock.Heading(level = level, text = headingMatch.groupValues[2].trim()))
-      i++
-      continue
-    }
-
-    // Blockquote
-    if (trimmed.startsWith("> ")) {
-      flushParagraph()
-      blocks.add(MarkdownBlock.BlockQuote(trimmed.removePrefix("> ").trim()))
-      i++
-      continue
-    }
-
-    // Unordered list item
-    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-      flushParagraph()
-      blocks.add(MarkdownBlock.BulletItem(trimmed.drop(2).trim()))
-      i++
-      continue
-    }
-
-    // Ordered list item
-    val orderedMatch = ORDERED_LIST_REGEX.matchEntire(trimmed)
-    if (orderedMatch != null) {
-      flushParagraph()
-      blocks.add(
-        MarkdownBlock.OrderedItem(
-          number = orderedMatch.groupValues[1],
-          text = orderedMatch.groupValues[2].trim(),
-        )
-      )
-      i++
-      continue
-    }
-
-    if (paragraphBuffer.isNotEmpty()) {
-      paragraphBuffer.append('\n')
-    }
-    paragraphBuffer.append(line)
-    i++
-  }
-
-  flushParagraph()
-  return blocks
-}
-
 private fun formatInlineMarkdown(
   text: String,
   inlineCodeBg: Color,
@@ -346,9 +575,10 @@ private fun formatInlineMarkdown(
   val length = text.length
 
   while (index < length) {
+    val ch = text[index]
     when {
       // Inline code `...`
-      text[index] == '`' -> {
+      ch == '`' -> {
         val end = text.indexOf('`', index + 1)
         if (end != -1) {
           withStyle(
@@ -358,20 +588,20 @@ private fun formatInlineMarkdown(
               background = inlineCodeBg,
             )
           ) {
-            append(text.substring(index + 1, end))
+            append(text, index + 1, end)
           }
           index = end + 1
         } else {
-          append(text[index])
+          append(ch)
           index++
         }
       }
-      // Bold+Italic ***...***
-      text.startsWith("***", index) -> {
+      // Bold+Italic ***...*** or Bold **...**
+      ch == '*' && text.startsWith("***", index) -> {
         val end = text.indexOf("***", index + 3)
         if (end != -1) {
           withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)) {
-            append(text.substring(index + 3, end))
+            append(text, index + 3, end)
           }
           index = end + 3
         } else {
@@ -379,12 +609,11 @@ private fun formatInlineMarkdown(
           index += 3
         }
       }
-      // Bold **...**
-      text.startsWith("**", index) -> {
+      ch == '*' && text.startsWith("**", index) -> {
         val end = text.indexOf("**", index + 2)
         if (end != -1) {
           withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-            append(text.substring(index + 2, end))
+            append(text, index + 2, end)
           }
           index = end + 2
         } else {
@@ -393,11 +622,11 @@ private fun formatInlineMarkdown(
         }
       }
       // Strikethrough ~~...~~
-      text.startsWith("~~", index) -> {
+      ch == '~' && text.startsWith("~~", index) -> {
         val end = text.indexOf("~~", index + 2)
         if (end != -1) {
           withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
-            append(text.substring(index + 2, end))
+            append(text, index + 2, end)
           }
           index = end + 2
         } else {
@@ -405,12 +634,12 @@ private fun formatInlineMarkdown(
           index += 2
         }
       }
-      // Italic *...* (avoid matching stray list stars with spaces)
-      text[index] == '*' && index + 1 < length && text[index + 1] != ' ' -> {
+      // Italic *...*
+      ch == '*' && index + 1 < length && text[index + 1] != ' ' -> {
         val end = text.indexOf('*', index + 1)
         if (end != -1 && end > index + 1) {
           withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-            append(text.substring(index + 1, end))
+            append(text, index + 1, end)
           }
           index = end + 1
         } else {
@@ -419,8 +648,15 @@ private fun formatInlineMarkdown(
         }
       }
       else -> {
-        append(text[index])
-        index++
+        // Scan plain run until the next special markdown marker to reduce append() calls
+        var plainEnd = index + 1
+        while (plainEnd < length) {
+          val next = text[plainEnd]
+          if (next == '`' || next == '*' || next == '~') break
+          plainEnd++
+        }
+        append(text, index, plainEnd)
+        index = plainEnd
       }
     }
   }
@@ -431,6 +667,3 @@ private fun formatInlineMarkdown(
     }
   }
 }
-
-private val HEADING_REGEX = Regex("^(#{1,6})\\s+(.+)$")
-private val ORDERED_LIST_REGEX = Regex("^(\\d+)\\.\\s+(.+)$")

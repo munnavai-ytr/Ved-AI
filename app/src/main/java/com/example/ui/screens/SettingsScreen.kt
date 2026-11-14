@@ -487,10 +487,15 @@ private fun OpenRouterModelPickerSheet(
         modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
       ) {
-        items(items = models, key = { it.id }) { model ->
+        items(
+          items = models,
+          key = { it.id },
+          contentType = { "openrouter_model" },
+        ) { model ->
           val isSelected = model.id == selectedModelId
+          val onItemClick = remember(model.id, onSelectModel) { { onSelectModel(model.id) } }
           Surface(
-            onClick = { onSelectModel(model.id) },
+            onClick = onItemClick,
             shape = RoundedCornerShape(14.dp),
             color =
               if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)

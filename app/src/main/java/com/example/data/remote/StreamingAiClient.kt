@@ -69,7 +69,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
               if (line.isBlank() || line.startsWith(":")) continue
 
               if (line.startsWith("data:")) {
-                val payload = line.removePrefix("data:").trim()
+                val payload = line.substring(5).trim()
                 if (payload.isEmpty()) continue
                 if (payload == "[DONE]") break
 
@@ -177,7 +177,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
             extracted
               ?.trim()
               ?.trim('"', '\'', '.', ':')
-              ?.replace(Regex("\\s+"), " ")
+              ?.replace(WHITESPACE_REGEX, " ")
               ?.take(52)
               ?.takeIf { it.isNotBlank() }
           }
@@ -256,8 +256,14 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
         val candidates = root.optJSONArray("candidates") ?: return ParsedSse()
         val first = candidates.optJSONObject(0) ?: return ParsedSse()
         val parts = first.optJSONObject("content")?.optJSONArray("parts") ?: return ParsedSse()
+        val count = parts.length()
+        if (count == 0) return ParsedSse()
+        if (count == 1) {
+          val text = parts.optJSONObject(0)?.optString("text", "")
+          return ParsedSse(text = text)
+        }
         val sb = StringBuilder()
-        for (i in 0 until parts.length()) {
+        for (i in 0 until count) {
           val text = parts.optJSONObject(i)?.optString("text", "") ?: ""
           sb.append(text)
         }
@@ -304,5 +310,6 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
 
   private companion object {
     val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    val WHITESPACE_REGEX = Regex("\\s+")
   }
 }

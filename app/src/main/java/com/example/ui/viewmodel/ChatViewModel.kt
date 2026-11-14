@@ -11,6 +11,7 @@ import com.example.data.remote.StreamChunk
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.DeletedConversationBackup
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -23,9 +24,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.launch
 
+/**
+ * Stable structural UI state for [ChatScreen]. Deliberately excludes rapidly changing
+ * [ChatViewModel.streamingText] so unrelated message items and chrome do not recompose per token.
+ */
 @Immutable
 data class ChatUiState(
   val conversations: List<ConversationEntity> = emptyList(),
@@ -33,7 +40,6 @@ data class ChatUiState(
   val activeTitle: String = "Ved",
   val messages: List<MessageEntity> = emptyList(),
   val streamingMessageId: String? = null,
-  val streamingText: String = "",
   val isGenerating: Boolean = false,
   val activeProvider: AiProvider = AiProvider.GEMINI,
   val activeModelId: String = "gemini-2.5-flash",
@@ -50,16 +56,31 @@ sealed interface ChatUiEvent {
   data class CopyText(val text: String, val feedback: String) : ChatUiEvent
 }
 
+private sealed interface ThrottledStreamEvent {
+  data class Progress(val accumulatedText: String) : ThrottledStreamEvent
+
+  data class Completed(val finalText: String) : ThrottledStreamEvent
+
+  data class Error(val partialText: String, val message: String) : ThrottledStreamEvent
+}
+
 /**
- * ViewModel driving the primary chat experience, drawer history, streaming, stop/regenerate,
- * and auto-titling.
+ * ViewModel driving the primary chat experience, drawer history, isolated streaming state,
+ * stop/regenerate, and auto-titling.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
 
   private val _activeConversationId = MutableStateFlow<String?>(null)
   private val _streamingMessageId = MutableStateFlow<String?>(null)
+
+  /**
+   * Dedicated StateFlow for active streaming text so ONLY the single streaming message item
+   * observes and recomposes on streamed updates.
+   */
   private val _streamingText = MutableStateFlow("")
+  val streamingText: StateFlow<String> = _streamingText.asStateFlow()
+
   private val _isGenerating = MutableStateFlow(false)
   private val _inputText = MutableStateFlow("")
   val inputText: StateFlow<String> = _inputText.asStateFlow()
@@ -69,7 +90,7 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
 
   private var generationJob: Job? = null
   private var activeStreamingConversationId: String? = null
-  private var partialBuffer = StringBuilder()
+  @Volatile private var latestPartialText: String = ""
 
   private val preferencesFlow: StateFlow<UserPreferences> =
     repository.preferencesFlow.stateIn(
@@ -108,10 +129,8 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
         initialValue = emptyList(),
       )
 
-  private val streamingMetaFlow =
-    combine(_streamingMessageId, _streamingText, _isGenerating) { msgId, text, generating ->
-      Triple(msgId, text, generating)
-    }
+  private val generationStatusFlow =
+    combine(_streamingMessageId, _isGenerating) { msgId, generating -> msgId to generating }
 
   private val engineMetaFlow =
     combine(preferencesFlow, hasActiveApiKeyFlow) { prefs, hasKey -> prefs to hasKey }
@@ -121,9 +140,9 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
         conversationsFlow,
         _activeConversationId,
         messagesFlow,
-        streamingMetaFlow,
+        generationStatusFlow,
         engineMetaFlow,
-      ) { conversations, activeId, messages, streamingMeta, engineMeta ->
+      ) { conversations, activeId, messages, genStatus, engineMeta ->
         val (prefs, hasKey) = engineMeta
         val activeConv = conversations.firstOrNull { it.id == activeId }
         ChatUiState(
@@ -131,9 +150,8 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
           activeConversationId = activeId,
           activeTitle = activeConv?.title ?: "Ved",
           messages = messages,
-          streamingMessageId = streamingMeta.first,
-          streamingText = streamingMeta.second,
-          isGenerating = streamingMeta.third,
+          streamingMessageId = genStatus.first,
+          isGenerating = genStatus.second,
           activeProvider = prefs.activeProvider,
           activeModelId = prefs.activeModelId,
           hasActiveApiKey = hasKey,
@@ -262,10 +280,11 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     val job = generationJob ?: return
     val placeholderId = _streamingMessageId.value
     val convId = activeStreamingConversationId
-    val partial = partialBuffer.toString().trim()
+    val partial = latestPartialText.trim()
 
     job.cancel()
     generationJob = null
+    latestPartialText = ""
     _isGenerating.value = false
     _streamingMessageId.value = null
     _streamingText.value = ""
@@ -337,7 +356,7 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
     firstUserPrompt: String,
   ) {
     generationJob?.cancel()
-    partialBuffer = StringBuilder()
+    latestPartialText = ""
     activeStreamingConversationId = conversationId
     _isGenerating.value = true
     _streamingText.value = ""
@@ -346,66 +365,90 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
       viewModelScope.launch {
         val placeholder = repository.insertAssistantPlaceholder(conversationId, modelId)
         _streamingMessageId.value = placeholder.id
-        var lastEmitTimeMs = 0L
 
         try {
-          repository.streamResponse(provider, modelId, apiKey, history).collect { chunk ->
-            when (chunk) {
-              is StreamChunk.Delta -> {
-                partialBuffer.append(chunk.text)
-                val now = System.currentTimeMillis()
-                // Throttle UI updates to ~30fps during rapid token bursts to eliminate scroll jank.
-                if (now - lastEmitTimeMs >= 32L) {
-                  _streamingText.value = partialBuffer.toString()
-                  lastEmitTimeMs = now
-                }
-              }
-              is StreamChunk.Completed -> {
-                val finalText = partialBuffer.toString().trim()
-                _streamingText.value = finalText
-                if (finalText.isNotEmpty()) {
-                  repository.updateAssistantMessage(
-                    messageId = placeholder.id,
-                    conversationId = conversationId,
-                    content = finalText,
-                    isError = false,
-                  )
-                  if (shouldAutoTitle && firstUserPrompt.isNotBlank()) {
-                    launchAutoTitle(
-                      conversationId = conversationId,
-                      provider = provider,
-                      modelId = modelId,
-                      apiKey = apiKey,
-                      userPrompt = firstUserPrompt,
-                      assistantReply = finalText,
-                    )
+          // Accumulate tokens and throttle snapshots on Dispatchers.Default so the main thread
+          // is never woken up for individual network SSE deltas.
+          val buffer = StringBuilder(512)
+          var lastEmitTimeMs = 0L
+
+          repository
+            .streamResponse(provider, modelId, apiKey, history)
+            .transform { chunk ->
+              when (chunk) {
+                is StreamChunk.Delta -> {
+                  buffer.append(chunk.text)
+                  val now = System.currentTimeMillis()
+                  if (now - lastEmitTimeMs >= STREAM_EMIT_INTERVAL_MS) {
+                    val snapshot = buffer.toString()
+                    latestPartialText = snapshot
+                    lastEmitTimeMs = now
+                    emit(ThrottledStreamEvent.Progress(snapshot))
                   }
-                } else {
-                  repository.updateAssistantMessage(
-                    messageId = placeholder.id,
-                    conversationId = conversationId,
-                    content = "No response was returned by ${provider.displayName}.",
-                    isError = true,
-                  )
                 }
-              }
-              is StreamChunk.Error -> {
-                val partial = partialBuffer.toString().trim()
-                val textToSave =
-                  if (partial.isNotEmpty()) {
-                    "$partial\n\n_${chunk.message}_"
-                  } else {
-                    chunk.message
-                  }
-                repository.updateAssistantMessage(
-                  messageId = placeholder.id,
-                  conversationId = conversationId,
-                  content = textToSave,
-                  isError = partial.isEmpty(),
-                )
+                is StreamChunk.Completed -> {
+                  val finalText = buffer.toString().trim()
+                  latestPartialText = finalText
+                  emit(ThrottledStreamEvent.Completed(finalText))
+                }
+                is StreamChunk.Error -> {
+                  val partial = buffer.toString().trim()
+                  latestPartialText = partial
+                  emit(ThrottledStreamEvent.Error(partial, chunk.message))
+                }
               }
             }
-          }
+            .flowOn(Dispatchers.Default)
+            .collect { event ->
+              when (event) {
+                is ThrottledStreamEvent.Progress -> {
+                  _streamingText.value = event.accumulatedText
+                }
+                is ThrottledStreamEvent.Completed -> {
+                  val finalText = event.finalText
+                  _streamingText.value = finalText
+                  if (finalText.isNotEmpty()) {
+                    repository.updateAssistantMessage(
+                      messageId = placeholder.id,
+                      conversationId = conversationId,
+                      content = finalText,
+                      isError = false,
+                    )
+                    if (shouldAutoTitle && firstUserPrompt.isNotBlank()) {
+                      launchAutoTitle(
+                        conversationId = conversationId,
+                        provider = provider,
+                        modelId = modelId,
+                        apiKey = apiKey,
+                        userPrompt = firstUserPrompt,
+                        assistantReply = finalText,
+                      )
+                    }
+                  } else {
+                    repository.updateAssistantMessage(
+                      messageId = placeholder.id,
+                      conversationId = conversationId,
+                      content = "No response was returned by ${provider.displayName}.",
+                      isError = true,
+                    )
+                  }
+                }
+                is ThrottledStreamEvent.Error -> {
+                  val textToSave =
+                    if (event.partialText.isNotEmpty()) {
+                      "${event.partialText}\n\n_${event.message}_"
+                    } else {
+                      event.message
+                    }
+                  repository.updateAssistantMessage(
+                    messageId = placeholder.id,
+                    conversationId = conversationId,
+                    content = textToSave,
+                    isError = event.partialText.isEmpty(),
+                  )
+                }
+              }
+            }
         } catch (ce: CancellationException) {
           throw ce
         } catch (e: Exception) {
@@ -416,6 +459,7 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
             isError = true,
           )
         } finally {
+          latestPartialText = ""
           _isGenerating.value = false
           _streamingMessageId.value = null
           _streamingText.value = ""
@@ -448,7 +492,12 @@ class ChatViewModel(private val repository: ChatRepository) : ViewModel() {
   }
 
   private fun buildPreliminaryTitle(prompt: String): String {
-    val cleaned = prompt.replace(Regex("\\s+"), " ").trim()
+    val cleaned = prompt.replace(WHITESPACE_REGEX, " ").trim()
     return if (cleaned.length <= 42) cleaned else cleaned.take(40).trimEnd() + "…"
+  }
+
+  private companion object {
+    const val STREAM_EMIT_INTERVAL_MS = 48L
+    val WHITESPACE_REGEX = Regex("\\s+")
   }
 }

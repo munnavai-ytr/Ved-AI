@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,6 +55,12 @@ import com.example.data.model.AiProvider
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private val drawerDateFormat =
+  object : ThreadLocal<SimpleDateFormat>() {
+    override fun initialValue(): SimpleDateFormat =
+      SimpleDateFormat("MMM d", Locale.getDefault())
+  }
 
 /**
  * Navigation drawer listing saved local Room conversations with swipe-to-delete.
@@ -156,15 +163,28 @@ fun ChatDrawerContent(
           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
           verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-          items(items = conversations, key = { it.id }) { conversation ->
+          items(
+            items = conversations,
+            key = { it.id },
+            contentType = { "conversation" },
+          ) { conversation ->
+            val onSelect =
+              remember(conversation.id, onSelectConversation) {
+                { onSelectConversation(conversation.id) }
+              }
+            val onDelete =
+              remember(conversation.id, onDeleteConversation) {
+                {
+                  haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                  onDeleteConversation(conversation.id)
+                }
+              }
+
             DrawerConversationItem(
               conversation = conversation,
               isSelected = conversation.id == activeConversationId,
-              onClick = { onSelectConversation(conversation.id) },
-              onDelete = {
-                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                onDeleteConversation(conversation.id)
-              },
+              onClick = onSelect,
+              onDelete = onDelete,
             )
           }
         }
@@ -222,6 +242,11 @@ private fun DrawerConversationItem(
         }
       }
     )
+
+  val providerName =
+    remember(conversation.provider) { AiProvider.fromId(conversation.provider).displayName }
+  val relativeTime =
+    remember(conversation.updatedAt) { formatRelativeTimestamp(conversation.updatedAt) }
 
   SwipeToDismissBox(
     state = dismissState,
@@ -290,7 +315,7 @@ private fun DrawerConversationItem(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
           Text(
-            text = AiProvider.fromId(conversation.provider).displayName,
+            text = providerName,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
           )
@@ -300,7 +325,7 @@ private fun DrawerConversationItem(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
           Text(
-            text = formatRelativeTimestamp(conversation.updatedAt),
+            text = relativeTime,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -317,6 +342,6 @@ private fun formatRelativeTimestamp(timestampMs: Long): String {
     diff < 60_000L -> "Just now"
     diff < 3_600_000L -> "${diff / 60_000L}m ago"
     diff < 86_400_000L -> "${diff / 3_600_000L}h ago"
-    else -> SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(timestampMs))
+    else -> drawerDateFormat.get()?.format(Date(timestampMs)).orEmpty()
   }
 }
