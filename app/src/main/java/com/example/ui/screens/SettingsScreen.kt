@@ -54,6 +54,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -251,6 +252,18 @@ fun SettingsScreen(
                 onRefresh = viewModel::refreshOpenRouterModels,
               )
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(14.dp))
+
+            SuggestedRepliesSettingRow(
+              enabled = uiState.showSuggestedReplies,
+              onToggle = { enabled ->
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                viewModel.setShowSuggestedReplies(enabled)
+              },
+            )
           }
         }
 
@@ -925,5 +938,37 @@ private fun ApiKeyOverrideBlock(
         }
       }
     }
+  }
+}
+
+@Composable
+internal fun SuggestedRepliesSettingRow(
+  enabled: Boolean,
+  onToggle: (Boolean) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Row(
+    modifier = modifier.fillMaxWidth().heightIn(min = 48.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
+  ) {
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        text = stringResource(R.string.settings_suggested_replies_title),
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
+      Spacer(modifier = Modifier.height(2.dp))
+      Text(
+        text = stringResource(R.string.settings_suggested_replies_subtitle),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
+    Switch(
+      checked = enabled,
+      onCheckedChange = onToggle,
+      modifier = Modifier.testTag("show_suggested_replies_switch"),
+    )
   }
 }

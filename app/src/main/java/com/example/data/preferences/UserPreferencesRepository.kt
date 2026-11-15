@@ -28,6 +28,7 @@ data class UserPreferences(
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
   val onboardingCompleted: Boolean = false,
   val systemPrompt: String = "",
+  val showSuggestedReplies: Boolean = true,
 ) {
   val activeModelId: String
     get() =
@@ -51,6 +52,7 @@ class UserPreferencesRepository(private val context: Context) {
         themeMode = ThemeMode.fromId(prefs[KEY_THEME_MODE]),
         onboardingCompleted = prefs[KEY_ONBOARDING_COMPLETED] ?: false,
         systemPrompt = prefs[KEY_SYSTEM_PROMPT] ?: "",
+        showSuggestedReplies = prefs[KEY_SHOW_SUGGESTED_REPLIES] ?: true,
       )
     }
 
@@ -78,6 +80,10 @@ class UserPreferencesRepository(private val context: Context) {
     context.vedDataStore.edit { it[KEY_SYSTEM_PROMPT] = prompt }
   }
 
+  suspend fun setShowSuggestedReplies(enabled: Boolean) {
+    context.vedDataStore.edit { it[KEY_SHOW_SUGGESTED_REPLIES] = enabled }
+  }
+
   private companion object {
     val KEY_ACTIVE_PROVIDER = stringPreferencesKey("active_provider")
     val KEY_GEMINI_MODEL = stringPreferencesKey("gemini_model")
@@ -85,5 +91,6 @@ class UserPreferencesRepository(private val context: Context) {
     val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
     val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
+    val KEY_SHOW_SUGGESTED_REPLIES = booleanPreferencesKey("show_suggested_replies")
   }
 }

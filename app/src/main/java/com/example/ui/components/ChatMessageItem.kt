@@ -11,6 +11,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,6 +24,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MusicNote
@@ -30,6 +34,7 @@ import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -108,6 +113,9 @@ fun ChatMessageItem(
   onRegenerate: () -> Unit,
   canEdit: Boolean = true,
   onEditMessage: (() -> Unit)? = null,
+  isSpeaking: Boolean = false,
+  onToggleSpeak: (() -> Unit)? = null,
+  onBranchFromMessage: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   if (message.role == MessageEntity.ROLE_USER) {
@@ -117,6 +125,7 @@ fun ChatMessageItem(
       attachments = attachments,
       canEdit = canEdit,
       onEdit = onEditMessage,
+      onBranch = if (!isStreaming) onBranchFromMessage else null,
       modifier = modifier,
     )
   } else {
@@ -129,6 +138,9 @@ fun ChatMessageItem(
       canRegenerate = isLastAssistantMessage && !isStreaming,
       completionTokens = message.completionTokens,
       onRegenerate = onRegenerate,
+      isSpeaking = isSpeaking,
+      onToggleSpeak = onToggleSpeak,
+      onBranch = onBranchFromMessage,
       modifier = modifier,
     )
   }
@@ -141,6 +153,7 @@ private fun UserMessageBubble(
   attachments: List<MessageAttachmentEntity>,
   canEdit: Boolean,
   onEdit: (() -> Unit)?,
+  onBranch: (() -> Unit)?,
   modifier: Modifier = Modifier,
 ) {
   val clipboard = LocalClipboardManager.current
@@ -190,23 +203,49 @@ private fun UserMessageBubble(
       }
     }
 
-    if (onEdit != null) {
-      IconButton(
-        onClick = {
-          haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-          onEdit()
-        },
-        enabled = canEdit,
-        modifier = Modifier.size(48.dp).testTag("edit_message_button"),
+    if (onEdit != null || onBranch != null) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
       ) {
-        Icon(
-          imageVector = Icons.Outlined.Edit,
-          contentDescription = stringResource(R.string.cd_edit_message),
-          tint =
-            if (canEdit) MaterialTheme.colorScheme.onSurfaceVariant
-            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-          modifier = Modifier.size(16.dp),
-        )
+        if (onEdit != null) {
+          IconButton(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onEdit()
+            },
+            enabled = canEdit,
+            modifier = Modifier.size(48.dp).testTag("edit_message_button"),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.Edit,
+              contentDescription = stringResource(R.string.cd_edit_message),
+              tint =
+                if (canEdit) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+              modifier = Modifier.size(16.dp),
+            )
+          }
+        }
+        if (onBranch != null) {
+          IconButton(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onBranch()
+            },
+            enabled = canEdit,
+            modifier = Modifier.size(48.dp).testTag("branch_message_button"),
+          ) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+              contentDescription = stringResource(R.string.cd_branch_conversation),
+              tint =
+                if (canEdit) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+              modifier = Modifier.size(16.dp),
+            )
+          }
+        }
       }
     }
   }
@@ -293,6 +332,7 @@ private fun MessageFileAttachmentChip(attachment: MessageAttachmentEntity) {
   }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AssistantMessageBlock(
   content: String,
@@ -303,6 +343,9 @@ private fun AssistantMessageBlock(
   canRegenerate: Boolean,
   completionTokens: Int?,
   onRegenerate: () -> Unit,
+  isSpeaking: Boolean = false,
+  onToggleSpeak: (() -> Unit)? = null,
+  onBranch: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   val clipboard = LocalClipboardManager.current
@@ -390,10 +433,10 @@ private fun AssistantMessageBlock(
 
     // Message actions & token usage indicator
     if (!isStreaming && content.isNotBlank()) {
-      Row(
+      FlowRow(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.Center,
       ) {
         TextButton(
           onClick = {
@@ -415,6 +458,53 @@ private fun AssistantMessageBlock(
               else stringResource(R.string.action_copy),
             style = MaterialTheme.typography.labelMedium,
           )
+        }
+
+        if (onToggleSpeak != null && !isError) {
+          TextButton(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onToggleSpeak()
+            },
+            modifier = Modifier.heightIn(min = 48.dp).testTag("tts_message_button"),
+          ) {
+            Icon(
+              imageVector =
+                if (isSpeaking) Icons.Rounded.Stop else Icons.AutoMirrored.Rounded.VolumeUp,
+              contentDescription =
+                if (isSpeaking) stringResource(R.string.cd_stop_speaking)
+                else stringResource(R.string.cd_read_aloud),
+              modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+              text =
+                if (isSpeaking) stringResource(R.string.action_stop_speaking)
+                else stringResource(R.string.action_speak),
+              style = MaterialTheme.typography.labelMedium,
+            )
+          }
+        }
+
+        if (onBranch != null) {
+          TextButton(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onBranch()
+            },
+            modifier = Modifier.heightIn(min = 48.dp).testTag("branch_message_button"),
+          ) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+              contentDescription = stringResource(R.string.cd_branch_conversation),
+              modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+              text = stringResource(R.string.action_branch),
+              style = MaterialTheme.typography.labelMedium,
+            )
+          }
         }
 
         if (canRegenerate) {
@@ -439,12 +529,14 @@ private fun AssistantMessageBlock(
         }
 
         if (completionTokens != null && completionTokens > 0) {
-          Spacer(modifier = Modifier.weight(1f))
           Text(
             text = stringResource(R.string.message_tokens_count, completionTokens),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-            modifier = Modifier.padding(end = 4.dp).testTag("message_token_count"),
+            modifier =
+              Modifier.align(Alignment.CenterVertically)
+                .padding(horizontal = 8.dp)
+                .testTag("message_token_count"),
           )
         }
       }

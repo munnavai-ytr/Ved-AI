@@ -10,6 +10,7 @@ import com.example.data.local.dao.ChatDao
 import com.example.data.local.dao.MemoryDao
 import com.example.data.local.dao.SkillDao
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.FolderEntity
 import com.example.data.local.entity.MemoryEntity
 import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
@@ -17,19 +18,20 @@ import com.example.data.local.entity.SkillEntity
 import com.example.data.local.entity.SkillFileEntity
 
 /**
- * Local Room database storing chat sessions, messages, file attachments, long-term memories,
- * and custom Claude-style skills on-device.
+ * Local Room database storing chat sessions, folders, messages, file attachments,
+ * long-term memories, and custom Claude-style skills on-device.
  */
 @Database(
   entities = [
     ConversationEntity::class,
+    FolderEntity::class,
     MessageEntity::class,
     MemoryEntity::class,
     MessageAttachmentEntity::class,
     SkillEntity::class,
     SkillFileEntity::class,
   ],
-  version = 4,
+  version = 5,
   exportSchema = false,
 )
 abstract class VedDatabase : RoomDatabase() {
@@ -155,9 +157,44 @@ abstract class VedDatabase : RoomDatabase() {
         }
       }
 
+    /**
+     * Combined schema migration for pinned conversations (`isPinned`), conversation folders
+     * (`folders` table + `folderId` FK with `ON DELETE SET NULL`), and conversation branching
+     * (`branchedFromConversationId`).
+     */
+    val MIGRATION_4_5: Migration =
+      object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `folders` (
+              `id` TEXT NOT NULL,
+              `name` TEXT NOT NULL,
+              `colorTag` TEXT,
+              `createdAt` INTEGER NOT NULL,
+              PRIMARY KEY(`id`)
+            )
+            """.trimIndent()
+          )
+          db.execSQL("ALTER TABLE `conversations` ADD COLUMN `isPinned` INTEGER NOT NULL DEFAULT 0")
+          db.execSQL(
+            "ALTER TABLE `conversations` ADD COLUMN `folderId` TEXT REFERENCES `folders`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL"
+          )
+          db.execSQL(
+            "ALTER TABLE `conversations` ADD COLUMN `branchedFromConversationId` TEXT"
+          )
+          db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversations_folderId` ON `conversations` (`folderId`)"
+          )
+          db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_conversations_isPinned_updatedAt` ON `conversations` (`isPinned`, `updatedAt`)"
+          )
+        }
+      }
+
     fun create(context: Context): VedDatabase =
       Room.databaseBuilder(context.applicationContext, VedDatabase::class.java, DB_NAME)
-        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
         .build()
   }
 }

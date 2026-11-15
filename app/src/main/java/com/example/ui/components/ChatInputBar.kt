@@ -3,6 +3,10 @@ package com.example.ui.components
 import android.graphics.Bitmap
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -37,6 +41,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
@@ -44,6 +49,7 @@ import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -63,6 +69,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -105,6 +112,8 @@ fun ChatInputBar(
   hasEnabledSkills: Boolean = false,
   pinnedSkill: SkillEntity? = null,
   onOpenSkillPicker: () -> Unit = {},
+  isListening: Boolean = false,
+  onVoiceInputClick: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val haptic = LocalHapticFeedback.current
@@ -167,6 +176,10 @@ fun ChatInputBar(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
           }
+        }
+
+        AnimatedVisibility(visible = isListening) {
+          ListeningStatusBanner(onStopListening = onVoiceInputClick)
         }
 
         AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
@@ -291,6 +304,15 @@ fun ChatInputBar(
               )
             }
           }
+
+          VoiceMicIconButton(
+            isListening = isListening,
+            enabled = !isGenerating,
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onVoiceInputClick()
+            },
+          )
 
           if (hasEnabledSkills && pinnedSkill == null) {
             IconButton(
@@ -502,5 +524,111 @@ private fun PendingAttachmentChip(
         }
       }
     }
+  }
+}
+
+@Composable
+private fun VoiceMicIconButton(
+  isListening: Boolean,
+  enabled: Boolean,
+  onClick: () -> Unit,
+) {
+  IconButton(
+    onClick = onClick,
+    enabled = enabled,
+    modifier = Modifier.size(48.dp).testTag("mic_input_button"),
+  ) {
+    if (isListening) {
+      val pulseTransition = rememberInfiniteTransition(label = "mic_pulse")
+      val pulseAlpha by
+        pulseTransition.animateFloat(
+          initialValue = 0.45f,
+          targetValue = 1f,
+          animationSpec =
+            infiniteRepeatable(
+              animation = tween(durationMillis = 550),
+              repeatMode = RepeatMode.Reverse,
+            ),
+          label = "mic_pulse_alpha",
+        )
+      Box(
+        modifier =
+          Modifier.size(34.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = pulseAlpha)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          imageVector = Icons.Rounded.Mic,
+          contentDescription = stringResource(R.string.cd_stop_listening),
+          tint = MaterialTheme.colorScheme.error,
+          modifier = Modifier.size(20.dp),
+        )
+      }
+    } else {
+      Icon(
+        imageVector = Icons.Outlined.Mic,
+        contentDescription = stringResource(R.string.cd_voice_input),
+        tint =
+          if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
+          else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+        modifier = Modifier.size(22.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun ListeningStatusBanner(onStopListening: () -> Unit) {
+  val transition = rememberInfiniteTransition(label = "voice_banner_pulse")
+  val dotAlpha by
+    transition.animateFloat(
+      initialValue = 0.3f,
+      targetValue = 1f,
+      animationSpec =
+        infiniteRepeatable(
+          animation = tween(durationMillis = 500),
+          repeatMode = RepeatMode.Reverse,
+        ),
+      label = "voice_banner_dot",
+    )
+
+  Column(modifier = Modifier.fillMaxWidth().testTag("voice_listening_indicator")) {
+    Row(
+      modifier =
+        Modifier.fillMaxWidth()
+          .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f))
+          .padding(horizontal = 16.dp, vertical = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Box(
+        modifier =
+          Modifier.size(8.dp)
+            .alpha(dotAlpha)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.error)
+      )
+      Text(
+        text = stringResource(R.string.chat_listening),
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.weight(1f),
+      )
+      Surface(
+        onClick = onStopListening,
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.errorContainer,
+        modifier = Modifier.heightIn(min = 32.dp),
+      ) {
+        Text(
+          text = stringResource(R.string.action_stop_speaking),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.error,
+          modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+        )
+      }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
   }
 }

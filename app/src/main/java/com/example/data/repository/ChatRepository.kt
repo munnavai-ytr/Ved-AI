@@ -6,6 +6,7 @@ import com.example.data.local.dao.ChatDao
 import com.example.data.local.dao.MemoryDao
 import com.example.data.local.dao.SkillDao
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.FolderEntity
 import com.example.data.local.entity.MemoryEntity
 import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
@@ -99,6 +100,99 @@ class ChatRepository(
   val keyVersionFlow: StateFlow<Int> = apiKeyStore.keyVersion
 
   fun observeConversations(): Flow<List<ConversationEntity>> = chatDao.observeConversations()
+
+  fun observeFolders(): Flow<List<FolderEntity>> = chatDao.observeFolders()
+
+  suspend fun createFolder(name: String, colorTag: String? = null): FolderEntity? {
+    val trimmed = name.trim()
+    if (trimmed.isEmpty()) return null
+    val existing =
+      chatDao.getAllFoldersSync().firstOrNull { it.name.equals(trimmed, ignoreCase = true) }
+    if (existing != null) return existing
+    val folder =
+      FolderEntity(
+        id = UUID.randomUUID().toString(),
+        name = trimmed,
+        colorTag = colorTag,
+        createdAt = System.currentTimeMillis(),
+      )
+    chatDao.insertFolder(folder)
+    return folder
+  }
+
+  suspend fun deleteFolder(folderId: String) {
+    chatDao.deleteFolderById(folderId)
+  }
+
+  suspend fun setConversationPinned(conversationId: String, isPinned: Boolean) {
+    chatDao.setConversationPinned(conversationId, isPinned)
+  }
+
+  suspend fun moveConversationToFolder(conversationId: String, folderId: String?) {
+    chatDao.setConversationFolder(conversationId, folderId)
+  }
+
+  suspend fun getConversation(conversationId: String): ConversationEntity? =
+    chatDao.getConversation(conversationId)
+
+  /**
+   * Creates a branched copy of [sourceConversationId] containing all messages and attachment
+   * metadata rows up to and including [upToMessageId], returning the newly created conversation.
+   */
+  suspend fun branchConversation(
+    sourceConversationId: String,
+    upToMessageId: String,
+  ): ConversationEntity =
+    withContext(Dispatchers.IO) {
+      val source =
+        chatDao.getConversation(sourceConversationId)
+          ?: throw IllegalArgumentException("Source conversation not found: $sourceConversationId")
+      val allWithAttachments = chatDao.getMessagesWithAttachmentsSync(sourceConversationId)
+      val targetIndex = allWithAttachments.indexOfFirst { it.message.id == upToMessageId }
+      if (targetIndex < 0) {
+        throw IllegalArgumentException("Target message not found in conversation: $upToMessageId")
+      }
+
+      val slice = allWithAttachments.subList(0, targetIndex + 1)
+      val now = System.currentTimeMillis()
+      val newConversationId = UUID.randomUUID().toString()
+      val newConversation =
+        ConversationEntity(
+          id = newConversationId,
+          title = "${source.title} (branch)",
+          provider = source.provider,
+          modelId = source.modelId,
+          createdAt = now,
+          updatedAt = now,
+          isPinned = false,
+          folderId = source.folderId,
+          branchedFromConversationId = source.id,
+        )
+
+      val clonedMessages = ArrayList<MessageEntity>(slice.size)
+      val clonedAttachments = ArrayList<MessageAttachmentEntity>()
+
+      for (item in slice) {
+        val newMsgId = UUID.randomUUID().toString()
+        clonedMessages.add(
+          item.message.copy(
+            id = newMsgId,
+            conversationId = newConversationId,
+          )
+        )
+        for (att in item.attachments) {
+          clonedAttachments.add(
+            att.copy(
+              id = UUID.randomUUID().toString(),
+              messageId = newMsgId,
+            )
+          )
+        }
+      }
+
+      chatDao.insertBranchedConversation(newConversation, clonedMessages, clonedAttachments)
+      newConversation
+    }
 
   fun searchConversations(query: String): Flow<List<ConversationEntity>> {
     val trimmed = query.trim()
@@ -446,6 +540,7 @@ class ChatRepository(
 
   suspend fun exportBackupJson(): String =
     withContext(Dispatchers.IO) {
+      val folders = chatDao.getAllFoldersSync()
       val conversations = chatDao.getAllConversationsSync()
       val messages = chatDao.getAllMessagesSync()
       val attachments = chatDao.getAllAttachmentsSync()
@@ -456,6 +551,7 @@ class ChatRepository(
           conversations = conversations,
           messages = messages,
           attachments = attachments,
+          folders = folders,
         )
       backupJson.encodeToString(ChatBackup.serializer(), payload)
     }
@@ -464,17 +560,34 @@ class ChatRepository(
     withContext(Dispatchers.IO) {
       runCatching {
         val decoded = backupJson.decodeFromString(ChatBackup.serializer(), rawJson)
+        val existingFolderIds = chatDao.getAllFoldersSync().mapTo(HashSet()) { it.id }
+        val importedFolderIds = decoded.folders.mapTo(HashSet()) { it.id }
+        val validFolderIds = existingFolderIds + importedFolderIds
+
         val existingConversationIds = chatDao.getAllConversationsSync().mapTo(HashSet()) { it.id }
         val importedConversationIds = decoded.conversations.mapTo(HashSet()) { it.id }
         val validConversationIds = existingConversationIds + importedConversationIds
+        val sanitizedConversations =
+          decoded.conversations.map { conv ->
+            if (conv.folderId != null && conv.folderId !in validFolderIds) {
+              conv.copy(folderId = null)
+            } else {
+              conv
+            }
+          }
         val validMessages =
           decoded.messages.filter { it.conversationId in validConversationIds }
         val validMessageIds = validMessages.mapTo(HashSet()) { it.id }
         val validAttachments = decoded.attachments.filter { it.messageId in validMessageIds }
 
-        chatDao.importBackup(decoded.conversations, validMessages, validAttachments)
+        chatDao.importBackup(
+          conversations = sanitizedConversations,
+          messages = validMessages,
+          attachments = validAttachments,
+          folders = decoded.folders,
+        )
         ImportBackupSummary(
-          conversationsImported = decoded.conversations.size,
+          conversationsImported = sanitizedConversations.size,
           messagesImported = validMessages.size,
         )
       }
@@ -592,6 +705,19 @@ class ChatRepository(
       userPrompt = userPrompt,
       assistantReply = assistantReply,
       systemPrompt = systemPrompt,
+    )
+
+  suspend fun generateSuggestedReplies(
+    provider: AiProvider,
+    modelId: String,
+    apiKey: String,
+    history: List<MessageEntity>,
+  ): List<String> =
+    streamingClient.generateSuggestedReplies(
+      provider = provider,
+      modelId = modelId,
+      apiKey = apiKey,
+      history = history,
     )
 
   /**

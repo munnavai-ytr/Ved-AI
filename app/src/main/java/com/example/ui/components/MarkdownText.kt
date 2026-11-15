@@ -356,6 +356,105 @@ private fun parseOrderedListPrefixEnd(s: String, start: Int, end: Int): Pair<Int
 }
 
 /**
+ * Reuses [IncrementalMarkdownParser] to extract clean spoken/plain text from Markdown without
+ * raw syntax markers (`**`, `#`, code-fence backticks, `~~`, `>`).
+ */
+internal fun extractPlainTextFromMarkdown(markdown: String): String {
+  if (markdown.isBlank()) return ""
+  val blocks = IncrementalMarkdownParser().parse(markdown).blocks
+  if (blocks.isEmpty()) return stripInlineMarkdown(markdown)
+
+  return blocks
+    .mapNotNull { block ->
+      when (block) {
+        is MarkdownBlock.Heading -> stripInlineMarkdown(block.text)
+        is MarkdownBlock.Paragraph -> stripInlineMarkdown(block.text)
+        is MarkdownBlock.BulletItem -> stripInlineMarkdown(block.text)
+        is MarkdownBlock.OrderedItem -> "${block.number}. ${stripInlineMarkdown(block.text)}"
+        is MarkdownBlock.BlockQuote -> stripInlineMarkdown(block.text)
+        is MarkdownBlock.CodeBlock -> block.code.trim()
+      }.takeIf { it.isNotBlank() }
+    }
+    .joinToString(separator = "\n")
+}
+
+private fun stripInlineMarkdown(text: String): String {
+  val sb = StringBuilder(text.length)
+  var index = 0
+  val length = text.length
+  while (index < length) {
+    val ch = text[index]
+    when {
+      ch == '`' -> {
+        val end = text.indexOf('`', index + 1)
+        if (end != -1) {
+          sb.append(text, index + 1, end)
+          index = end + 1
+        } else {
+          sb.append(ch)
+          index++
+        }
+      }
+      ch == '*' && text.startsWith("***", index) -> {
+        val end = text.indexOf("***", index + 3)
+        if (end != -1) {
+          sb.append(text, index + 3, end)
+          index = end + 3
+        } else {
+          index += 3
+        }
+      }
+      ch == '*' && text.startsWith("**", index) -> {
+        val end = text.indexOf("**", index + 2)
+        if (end != -1) {
+          sb.append(text, index + 2, end)
+          index = end + 2
+        } else {
+          index += 2
+        }
+      }
+      ch == '~' && text.startsWith("~~", index) -> {
+        val end = text.indexOf("~~", index + 2)
+        if (end != -1) {
+          sb.append(text, index + 2, end)
+          index = end + 2
+        } else {
+          index += 2
+        }
+      }
+      ch == '[' -> {
+        val closeBracket = text.indexOf(']', index + 1)
+        if (closeBracket != -1 && closeBracket + 1 < length && text[closeBracket + 1] == '(') {
+          val closeParen = text.indexOf(')', closeBracket + 2)
+          if (closeParen != -1) {
+            sb.append(text, index + 1, closeBracket)
+            index = closeParen + 1
+            continue
+          }
+        }
+        sb.append(ch)
+        index++
+      }
+      ch == '*' && index + 1 < length && text[index + 1] != ' ' -> {
+        val end = text.indexOf('*', index + 1)
+        if (end != -1 && end > index + 1) {
+          sb.append(text, index + 1, end)
+          index = end + 1
+        } else {
+          sb.append('*')
+          index++
+        }
+      }
+      else -> {
+        sb.append(ch)
+        index++
+      }
+    }
+  }
+  return sb.toString().trim()
+}
+
+/**
  * Lightweight, incremental Markdown renderer supporting headings, bold, italic,
  * strikethrough, inline code, fenced code blocks with copy action, lists, and blockquotes.
  */

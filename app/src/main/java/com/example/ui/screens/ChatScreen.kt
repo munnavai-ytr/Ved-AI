@@ -17,6 +17,8 @@ import java.io.File
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,6 +39,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.Key
@@ -67,6 +70,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -92,12 +96,15 @@ import com.example.R
 import com.example.data.local.entity.MessageEntity
 import com.example.data.local.entity.SkillEntity
 import com.example.data.model.AiProvider
+import com.example.data.util.ChatTtsManager
+import com.example.data.util.VoiceInputController
 import com.example.service.VedNotifications
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
 import com.example.ui.components.StreamingChatMessageItem
 import com.example.ui.components.VedBrandMark
+import com.example.ui.components.extractPlainTextFromMarkdown
 import com.example.ui.viewmodel.ChatUiEvent
 import com.example.ui.viewmodel.ChatViewModel
 import kotlinx.coroutines.delay
@@ -117,7 +124,7 @@ private val SuggestedPrompts =
  * user message editing, multi-file attachments (images, PDFs, plain text/code), skill selector,
  * suggested prompts, copy/share export, and notification permission prompt on first generation.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
   viewModel: ChatViewModel,
@@ -142,6 +149,40 @@ fun ChatScreen(
 
   var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
   var cameraPermissionDeniedInSession by remember { mutableStateOf(false) }
+  var micPermissionDeniedInSession by remember { mutableStateOf(false) }
+
+  val voiceController =
+    remember(context) {
+      VoiceInputController(
+        context = context,
+        onFinalText = { transcript -> viewModel.appendVoiceTranscript(transcript) },
+        onErrorMessage = { message ->
+          scope.launch { snackbarHostState.showSnackbar(message) }
+        },
+      )
+    }
+  val isListening by voiceController.isListening.collectAsStateWithLifecycle()
+
+  val ttsManager =
+    remember(context) {
+      ChatTtsManager(
+        context = context,
+        onErrorMessage = { message ->
+          scope.launch { snackbarHostState.showSnackbar(message) }
+        },
+      )
+    }
+  val speakingMessageId by ttsManager.speakingMessageId.collectAsStateWithLifecycle()
+
+  DisposableEffect(voiceController) {
+    onDispose { voiceController.destroy() }
+  }
+  DisposableEffect(ttsManager) {
+    onDispose { ttsManager.shutdown() }
+  }
+  LaunchedEffect(uiState.activeConversationId) {
+    ttsManager.stop()
+  }
 
   val notificationPermissionLauncher =
     rememberLauncherForActivityResult(
@@ -190,6 +231,20 @@ fun ChatScreen(
       } else {
         cameraPermissionDeniedInSession = true
         scope.launch { snackbarHostState.showSnackbar(cameraPermissionDeniedMessage) }
+      }
+    }
+
+  val micPermissionDeniedMessage = stringResource(R.string.chat_mic_permission_denied)
+  val micPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+      if (granted) {
+        micPermissionDeniedInSession = false
+        voiceController.startListening()
+      } else {
+        micPermissionDeniedInSession = true
+        scope.launch { snackbarHostState.showSnackbar(micPermissionDeniedMessage) }
       }
     }
 
@@ -431,6 +486,32 @@ fun ChatScreen(
       }
     }
 
+  val onVoiceInputClick: () -> Unit =
+    remember(
+      isListening,
+      context,
+      micPermissionDeniedInSession,
+      micPermissionLauncher,
+      micPermissionDeniedMessage,
+      voiceController,
+    ) {
+      {
+        if (isListening) {
+          voiceController.stopListening()
+        } else if (
+          ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+          voiceController.startListening()
+        } else if (micPermissionDeniedInSession) {
+          scope.launch { snackbarHostState.showSnackbar(micPermissionDeniedMessage) }
+        } else {
+          micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+        Unit
+      }
+    }
+
   ModalNavigationDrawer(
     drawerState = drawerState,
     drawerContent = {
@@ -444,6 +525,11 @@ fun ChatScreen(
         onDeleteConversation = onDeleteConversation,
         onNewChat = onDrawerNewChat,
         onOpenSettings = onDrawerOpenSettings,
+        folders = uiState.folders,
+        onTogglePinConversation = viewModel::togglePinConversation,
+        onMoveConversationToFolder = viewModel::moveConversationToFolder,
+        onCreateFolder = viewModel::createFolder,
+        onDeleteFolder = viewModel::deleteFolder,
       )
     },
     modifier = modifier,
@@ -568,6 +654,14 @@ fun ChatScreen(
           )
         }
 
+        val branchedTitle = uiState.branchedFromTitle
+        if (!branchedTitle.isNullOrBlank()) {
+          BranchedFromBanner(
+            originalTitle = branchedTitle,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+          )
+        }
+
         Box(
           modifier = Modifier.weight(1f).fillMaxWidth(),
           contentAlignment = Alignment.TopCenter,
@@ -609,6 +703,25 @@ fun ChatScreen(
                         null
                       }
                     }
+                  val onToggleSpeak: (() -> Unit)? =
+                    remember(msg.id, msg.content, msg.role, ttsManager) {
+                      if (msg.role == MessageEntity.ROLE_ASSISTANT) {
+                        {
+                          val plainText = extractPlainTextFromMarkdown(msg.content)
+                          ttsManager.toggleSpeak(msg.id, plainText)
+                        }
+                      } else {
+                        null
+                      }
+                    }
+                  val onBranch: (() -> Unit)? =
+                    remember(msg.id, msg.content, viewModel) {
+                      if (msg.content.isNotBlank() || item.attachments.isNotEmpty()) {
+                        { viewModel.branchFromMessage(msg.id) }
+                      } else {
+                        null
+                      }
+                    }
                   ChatMessageItem(
                     message = msg,
                     attachments = item.attachments,
@@ -618,6 +731,25 @@ fun ChatScreen(
                     onRegenerate = onRegenerate,
                     canEdit = !uiState.isGenerating,
                     onEditMessage = onEdit,
+                    isSpeaking = speakingMessageId == msg.id,
+                    onToggleSpeak = onToggleSpeak,
+                    onBranchFromMessage = onBranch,
+                  )
+                }
+              }
+
+              if (
+                !uiState.isGenerating &&
+                  uiState.suggestedReplies.isNotEmpty() &&
+                  uiState.messages.lastOrNull()?.message?.id == uiState.suggestedRepliesMessageId
+              ) {
+                item(key = "suggested_replies", contentType = "suggested_replies") {
+                  SuggestedRepliesRow(
+                    suggestions = uiState.suggestedReplies,
+                    onSuggestionClick = { suggestion ->
+                      haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                      runAfterNotificationPrompt { viewModel.sendMessage(suggestion) }
+                    },
                   )
                 }
               }
@@ -643,6 +775,8 @@ fun ChatScreen(
           hasEnabledSkills = uiState.enabledSkills.isNotEmpty(),
           pinnedSkill = uiState.pinnedSkill,
           onOpenSkillPicker = { showSkillPicker = true },
+          isListening = isListening,
+          onVoiceInputClick = onVoiceInputClick,
         )
       }
     }
@@ -815,6 +949,77 @@ private fun MissingKeyBanner(
         modifier = Modifier.heightIn(min = 48.dp).testTag("missing_key_settings_button"),
       ) {
         Text(text = stringResource(R.string.chat_open_settings))
+      }
+    }
+  }
+}
+
+@Composable
+private fun BranchedFromBanner(
+  originalTitle: String,
+  modifier: Modifier = Modifier,
+) {
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    modifier = modifier.widthIn(max = 680.dp).testTag("branched_from_banner"),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      Icon(
+        imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(14.dp),
+      )
+      Text(
+        text = stringResource(R.string.chat_branched_from, originalTitle),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SuggestedRepliesRow(
+  suggestions: List<String>,
+  onSuggestionClick: (String) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  FlowRow(
+    modifier =
+      modifier
+        .fillMaxWidth()
+        .padding(horizontal = 16.dp, vertical = 8.dp)
+        .testTag("suggested_replies_row"),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    suggestions.forEachIndexed { index, suggestion ->
+      Surface(
+        onClick = { onSuggestionClick(suggestion) },
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 1.dp,
+        modifier = Modifier.heightIn(min = 48.dp).testTag("suggested_reply_chip_$index"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            text = suggestion,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+        }
       }
     }
   }

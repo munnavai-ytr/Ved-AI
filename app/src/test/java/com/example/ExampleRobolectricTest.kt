@@ -11,21 +11,27 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.VedDatabase
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.FolderEntity
 import com.example.data.local.entity.MessageEntity
 import com.example.data.model.ThemeMode
+import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
 import com.example.ui.components.IncrementalMarkdownParser
 import com.example.ui.components.MarkdownBlock
 import com.example.ui.components.StreamingChatMessageItem
+import com.example.ui.components.extractPlainTextFromMarkdown
 import com.example.ui.screens.OnboardingScreen
+import com.example.ui.screens.SuggestedRepliesSettingRow
 import com.example.ui.theme.VedTheme
 import com.example.ui.viewmodel.ChatUiState
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -57,6 +63,7 @@ import com.example.data.util.AttachmentTypes
 import com.example.data.util.MemoryPromptHelper
 import com.example.data.util.PendingAttachment
 import com.example.data.util.SkillMatcher
+import com.example.data.util.SpeechAndTtsUtils
 import com.example.service.VedNotifications
 import com.example.ui.screens.MemoryScreen
 import com.example.ui.viewmodel.MemoryViewModel
@@ -201,6 +208,7 @@ class ExampleRobolectricTest {
           VedDatabase.MIGRATION_1_2,
           VedDatabase.MIGRATION_2_3,
           VedDatabase.MIGRATION_3_4,
+          VedDatabase.MIGRATION_4_5,
         )
         .build()
     try {
@@ -445,6 +453,7 @@ class ExampleRobolectricTest {
           VedDatabase.MIGRATION_1_2,
           VedDatabase.MIGRATION_2_3,
           VedDatabase.MIGRATION_3_4,
+          VedDatabase.MIGRATION_4_5,
         )
         .build()
     try {
@@ -965,6 +974,7 @@ class ExampleRobolectricTest {
             VedDatabase.MIGRATION_1_2,
             VedDatabase.MIGRATION_2_3,
             VedDatabase.MIGRATION_3_4,
+            VedDatabase.MIGRATION_4_5,
           )
           .build()
       try {
@@ -1437,6 +1447,7 @@ class ExampleRobolectricTest {
 
     val permissions = pkgInfo.requestedPermissions?.toSet().orEmpty()
     assertTrue(Manifest.permission.CAMERA in permissions)
+    assertTrue(Manifest.permission.RECORD_AUDIO in permissions)
     assertTrue(Manifest.permission.READ_EXTERNAL_STORAGE !in permissions)
     assertTrue("android.permission.READ_MEDIA_IMAGES" !in permissions)
     assertTrue("android.permission.READ_MEDIA_VIDEO" !in permissions)
@@ -1454,4 +1465,431 @@ class ExampleRobolectricTest {
       !AiModelInfo("anthropic/claude-opus-4", "Claude Opus 4", AiProvider.OPENROUTER).isFastModel()
     )
   }
+
+  @Test
+  fun `room migration 4 to 5 adds folders pin sorting and set null on folder delete`() = runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val dbName = "migration_v4_v5_ved.db"
+    context.deleteDatabase(dbName)
+
+    val helper =
+      FrameworkSQLiteOpenHelperFactory()
+        .create(
+          SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(dbName)
+            .callback(
+              object : SupportSQLiteOpenHelper.Callback(4) {
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `conversations` (
+                      `id` TEXT NOT NULL,
+                      `title` TEXT NOT NULL,
+                      `provider` TEXT NOT NULL,
+                      `modelId` TEXT NOT NULL,
+                      `createdAt` INTEGER NOT NULL,
+                      `updatedAt` INTEGER NOT NULL,
+                      PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `messages` (
+                      `id` TEXT NOT NULL,
+                      `conversationId` TEXT NOT NULL,
+                      `role` TEXT NOT NULL,
+                      `content` TEXT NOT NULL,
+                      `modelId` TEXT,
+                      `isError` INTEGER NOT NULL,
+                      `createdAt` INTEGER NOT NULL,
+                      `imageUri` TEXT,
+                      `promptTokens` INTEGER,
+                      `completionTokens` INTEGER,
+                      `activeSkillName` TEXT,
+                      PRIMARY KEY(`id`),
+                      FOREIGN KEY(`conversationId`) REFERENCES `conversations`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_messages_conversationId_createdAt` ON `messages` (`conversationId`, `createdAt`)"
+                  )
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_attachments` (
+                      `id` TEXT NOT NULL,
+                      `messageId` TEXT NOT NULL,
+                      `type` TEXT NOT NULL,
+                      `displayName` TEXT NOT NULL,
+                      `mimeType` TEXT NOT NULL,
+                      `localPath` TEXT NOT NULL,
+                      `sizeBytes` INTEGER NOT NULL,
+                      PRIMARY KEY(`id`),
+                      FOREIGN KEY(`messageId`) REFERENCES `messages`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_message_attachments_messageId` ON `message_attachments` (`messageId`)"
+                  )
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `memories` (
+                      `id` TEXT NOT NULL,
+                      `content` TEXT NOT NULL,
+                      `category` TEXT NOT NULL,
+                      `source` TEXT NOT NULL,
+                      `createdAt` INTEGER NOT NULL,
+                      `updatedAt` INTEGER NOT NULL,
+                      PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_memories_updatedAt` ON `memories` (`updatedAt`)"
+                  )
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `skills` (
+                      `id` TEXT NOT NULL,
+                      `name` TEXT NOT NULL,
+                      `description` TEXT NOT NULL,
+                      `skillMarkdown` TEXT NOT NULL,
+                      `isEnabled` INTEGER NOT NULL,
+                      `source` TEXT NOT NULL,
+                      `createdAt` INTEGER NOT NULL,
+                      `updatedAt` INTEGER NOT NULL,
+                      PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_skills_updatedAt` ON `skills` (`updatedAt`)"
+                  )
+                  db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `skill_files` (
+                      `id` TEXT NOT NULL,
+                      `skillId` TEXT NOT NULL,
+                      `fileName` TEXT NOT NULL,
+                      `content` TEXT NOT NULL,
+                      PRIMARY KEY(`id`),
+                      FOREIGN KEY(`skillId`) REFERENCES `skills`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                  )
+                  db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_skill_files_skillId` ON `skill_files` (`skillId`)"
+                  )
+                  db.execSQL(
+                    "INSERT INTO conversations VALUES ('c-old', 'Older Chat', 'gemini', 'gemini-flash-latest', 100, 100)"
+                  )
+                  db.execSQL(
+                    "INSERT INTO conversations VALUES ('c-new', 'Newer Chat', 'gemini', 'gemini-flash-latest', 200, 200)"
+                  )
+                }
+
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+              }
+            )
+            .build()
+        )
+    helper.writableDatabase.close()
+    helper.close()
+
+    val migratedDb =
+      Room.databaseBuilder(context, VedDatabase::class.java, dbName)
+        .addMigrations(
+          VedDatabase.MIGRATION_1_2,
+          VedDatabase.MIGRATION_2_3,
+          VedDatabase.MIGRATION_3_4,
+          VedDatabase.MIGRATION_4_5,
+        )
+        .build()
+    try {
+      val dao = migratedDb.chatDao()
+      val initial = dao.observeConversations().first()
+      assertEquals(listOf("c-new", "c-old"), initial.map { it.id })
+      assertTrue(initial.all { !it.isPinned && it.folderId == null && it.branchedFromConversationId == null })
+
+      // Pin older chat -> floats above newer unpinned chat
+      dao.setConversationPinned("c-old", true)
+      val afterPin = dao.observeConversations().first()
+      assertEquals(listOf("c-old", "c-new"), afterPin.map { it.id })
+
+      // Create folder, move c-new into it, then delete folder -> SET NULL preserves c-new
+      dao.insertFolder(FolderEntity(id = "f-work", name = "Work", createdAt = 300L))
+      dao.setConversationFolder("c-new", "f-work")
+      assertEquals("f-work", dao.getConversation("c-new")?.folderId)
+
+      dao.deleteFolderById("f-work")
+      assertNull(dao.getConversation("c-new")?.folderId)
+      assertEquals(2, dao.getAllConversationsSync().size)
+    } finally {
+      migratedDb.close()
+      context.deleteDatabase(dbName)
+    }
+  }
+
+  @Test
+  fun `branchConversation duplicates sliced messages and attachments with branchedFromConversationId`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val db = Room.inMemoryDatabaseBuilder(context, VedDatabase::class.java).build()
+      try {
+        val fakeRetrofit =
+          Retrofit.Builder().baseUrl("https://openrouter.ai/").client(OkHttpClient()).build()
+        val repo =
+          ChatRepository(
+            appContext = context,
+            chatDao = db.chatDao(),
+            memoryDao = db.memoryDao(),
+            skillDao = db.skillDao(),
+            streamingClient = StreamingAiClient(OkHttpClient()),
+            geminiApi = fakeRetrofit.create(GeminiApiService::class.java),
+            openRouterApi = fakeRetrofit.create(OpenRouterApiService::class.java),
+            apiKeyStore = ApiKeyStore(context),
+            preferencesRepository = UserPreferencesRepository(context),
+          )
+
+        val orig = repo.createConversation(AiProvider.GEMINI, "gemini-flash-latest", "Kotlin Design")
+        val u1 =
+          repo.insertUserMessage(
+            conversationId = orig.id,
+            content = "First question",
+            attachments =
+              listOf(
+                PendingAttachment(
+                  id = "att-u1",
+                  type = AttachmentTypes.TEXT,
+                  displayName = "notes.txt",
+                  mimeType = "text/plain",
+                  localPath = "/tmp/notes.txt",
+                  sizeBytes = 64L,
+                )
+              ),
+          )
+        val a1 = repo.insertAssistantPlaceholder(orig.id, "gemini-flash-latest")
+        repo.updateAssistantMessage(a1.id, orig.id, "First answer", isError = false)
+        val u2 = repo.insertUserMessage(orig.id, "Second question")
+        val a2 = repo.insertAssistantPlaceholder(orig.id, "gemini-flash-latest")
+        repo.updateAssistantMessage(a2.id, orig.id, "Second answer", isError = false)
+
+        val branched = repo.branchConversation(orig.id, upToMessageId = a1.id)!!
+        assertEquals("Kotlin Design (branch)", branched.title)
+        assertEquals(orig.id, branched.branchedFromConversationId)
+        assertTrue(!branched.isPinned)
+
+        val branchedMessages = repo.getMessagesWithAttachmentsSync(branched.id)
+        assertEquals(2, branchedMessages.size)
+        assertEquals("First question", branchedMessages[0].message.content)
+        assertEquals("First answer", branchedMessages[1].message.content)
+        assertTrue(branchedMessages[0].message.id != u1.id)
+        assertEquals(1, branchedMessages[0].attachments.size)
+        assertEquals("/tmp/notes.txt", branchedMessages[0].attachments.first().localPath)
+        assertTrue(branchedMessages[0].attachments.first().id != "att-u1")
+
+        // Original stays intact with all 4 messages
+        assertEquals(4, repo.getMessagesSync(orig.id).size)
+        assertEquals(listOf(u1.id, a1.id, u2.id, a2.id), repo.getMessagesSync(orig.id).map { it.id })
+      } finally {
+        db.close()
+      }
+    }
+
+  @Test
+  fun `suggested replies parser markdown plain text extractor and speech tts helpers work accurately`() {
+    val parsed =
+      StreamingAiClient(OkHttpClient()).parseSuggestedRepliesText(
+        """
+        1. Can you show a Kotlin example?
+        - "What are the trade-offs with Room?"
+        • How do I test this with Robolectric?
+        4. Extra line should be capped
+        """.trimIndent()
+      )
+    assertEquals(
+      listOf(
+        "Can you show a Kotlin example?",
+        "What are the trade-offs with Room?",
+        "How do I test this with Robolectric?",
+      ),
+      parsed,
+    )
+
+    val plain =
+      extractPlainTextFromMarkdown(
+        """
+        # Overview
+
+        Use **Kotlin Coroutines** and [Room](https://developer.android.com) with `Flow`.
+
+        - Fast reads
+        - Safe migrations
+
+        ```kotlin
+        val x = 1
+        ```
+        """.trimIndent()
+      )
+    assertTrue(plain.contains("Overview"))
+    assertTrue(plain.contains("Kotlin Coroutines"))
+    assertTrue(!plain.contains("**"))
+    assertTrue(!plain.contains("https://developer.android.com"))
+    assertTrue(plain.contains("val x = 1"))
+
+    assertEquals("Hello", SpeechAndTtsUtils.appendRecognizedSpeech("", "  Hello  "))
+    assertEquals("Hello world", SpeechAndTtsUtils.appendRecognizedSpeech("Hello", "world"))
+    assertEquals("Hello world", SpeechAndTtsUtils.appendRecognizedSpeech("Hello ", "world"))
+
+    assertEquals("bn", SpeechAndTtsUtils.detectTtsLocale("আপনি কেমন আছেন?").language)
+    assertEquals("en", SpeechAndTtsUtils.detectTtsLocale("How are you today?", java.util.Locale.US).language)
+    val chunks = SpeechAndTtsUtils.splitTextForTts("First sentence. Second sentence. Third sentence.", maxChunkLength = 25)
+    assertTrue(chunks.size >= 2)
+  }
+
+  @Test
+  fun `voice input button tts controls and branch actions render and respond to clicks`() {
+    var micClicked = 0
+    var ttsClicked = 0
+    var branchClicked = 0
+    val msgUser = MessageEntity("u1", "c1", MessageEntity.ROLE_USER, "Hi", createdAt = 1L)
+    val msgBot = MessageEntity("a1", "c1", MessageEntity.ROLE_ASSISTANT, "Hello!", createdAt = 2L)
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        LazyColumn {
+          item {
+            ChatMessageItem(
+              message = msgUser,
+              displayContent = msgUser.content,
+              isStreaming = false,
+              isLastAssistantMessage = false,
+              onRegenerate = {},
+              onEditMessage = {},
+              onBranchFromMessage = { branchClicked++ },
+            )
+          }
+          item {
+            ChatMessageItem(
+              message = msgBot,
+              displayContent = msgBot.content,
+              isStreaming = false,
+              isLastAssistantMessage = true,
+              onRegenerate = {},
+              isSpeaking = false,
+              onToggleSpeak = { ttsClicked++ },
+              onBranchFromMessage = { branchClicked++ },
+            )
+          }
+          item {
+            ChatInputBar(
+              text = "Draft",
+              onTextChange = {},
+              isGenerating = false,
+              onSend = {},
+              onStop = {},
+              isListening = true,
+              onVoiceInputClick = { micClicked++ },
+            )
+          }
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("mic_input_button").assertIsDisplayed().performClick()
+    composeTestRule.onNodeWithTag("voice_listening_indicator").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("tts_message_button").assertIsDisplayed().performClick()
+    assertEquals(1, micClicked)
+    assertEquals(1, ttsClicked)
+  }
+
+  @Test
+  fun `drawer displays pinned section branched icon and collapsible folders`() {
+    val folders = listOf(FolderEntity("f1", "Work", createdAt = 10L))
+    val convs =
+      listOf(
+        ConversationEntity(
+          "c-pin",
+          "Pinned Chat",
+          "gemini",
+          "gemini-flash-latest",
+          1L,
+          100L,
+          isPinned = true,
+          branchedFromConversationId = "c0",
+        ),
+        ConversationEntity(
+          "c-work",
+          "Foldered Chat",
+          "gemini",
+          "gemini-flash-latest",
+          2L,
+          90L,
+          folderId = "f1",
+        ),
+        ConversationEntity("c-recent", "Recent Chat", "gemini", "gemini-flash-latest", 3L, 80L),
+      )
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        ChatDrawerContent(
+          conversations = convs,
+          activeConversationId = "c-pin",
+          onSelectConversation = {},
+          onDeleteConversation = {},
+          onNewChat = {},
+          onOpenSettings = {},
+          folders = folders,
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("drawer_pinned_section").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("pinned_conversation_icon", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithTag("branched_conversation_icon", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithTag("drawer_new_folder_button").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("drawer_conversations_list")
+      .performScrollToNode(hasTestTag("drawer_folder_header_f1"))
+    composeTestRule.onNodeWithTag("drawer_folder_header_f1").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("drawer_conversations_list")
+      .performScrollToNode(hasTestTag("drawer_conversation_c-work"))
+    composeTestRule.onNodeWithTag("drawer_conversation_c-work").assertIsDisplayed()
+
+    composeTestRule.onNodeWithTag("drawer_conversations_list")
+      .performScrollToNode(hasTestTag("drawer_folder_header_f1"))
+    composeTestRule.onNodeWithTag("drawer_folder_header_f1").performClick()
+    composeTestRule.waitForIdle()
+    assertTrue(composeTestRule.onAllNodesWithText("Foldered Chat").fetchSemanticsNodes().isEmpty())
+  }
+
+  @Test
+  fun `suggested replies setting persists in preferences and toggle switch updates state`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val prefsRepo = UserPreferencesRepository(context)
+      assertTrue(prefsRepo.preferencesFlow.first().showSuggestedReplies)
+
+      prefsRepo.setShowSuggestedReplies(false)
+      assertTrue(!prefsRepo.preferencesFlow.first().showSuggestedReplies)
+
+      prefsRepo.setShowSuggestedReplies(true)
+      assertTrue(prefsRepo.preferencesFlow.first().showSuggestedReplies)
+
+      var toggledTo: Boolean? = null
+      composeTestRule.setContent {
+        VedTheme(themeMode = ThemeMode.LIGHT) {
+          SuggestedRepliesSettingRow(
+            enabled = true,
+            onToggle = { toggledTo = it },
+          )
+        }
+      }
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithTag("show_suggested_replies_switch").assertIsDisplayed().performClick()
+      assertEquals(false, toggledTo)
+    }
 }

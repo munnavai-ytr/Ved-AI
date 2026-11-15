@@ -2,7 +2,9 @@ package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,24 +25,39 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
+import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
+import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -58,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.FolderEntity
 import com.example.data.model.AiProvider
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -70,8 +88,11 @@ private val drawerDateFormat =
   }
 
 /**
- * Navigation drawer listing saved local Room conversations with debounced search and swipe-to-delete.
+ * Navigation drawer listing saved local Room conversations grouped into Pinned, collapsible
+ * user-defined Folders, and Recent chats, with debounced search, long-press context menu
+ * (Pin/Unpin, Move to folder, Delete), and swipe-to-delete.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatDrawerContent(
   conversations: List<ConversationEntity>,
@@ -83,10 +104,32 @@ fun ChatDrawerContent(
   onDeleteConversation: (String) -> Unit,
   onNewChat: () -> Unit,
   onOpenSettings: () -> Unit,
+  folders: List<FolderEntity> = emptyList(),
+  onTogglePinConversation: (String, Boolean) -> Unit = { _, _ -> },
+  onMoveConversationToFolder: (String, String?) -> Unit = { _, _ -> },
+  onCreateFolder: (String, String?) -> Unit = { _, _ -> },
+  onDeleteFolder: (String) -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val haptic = LocalHapticFeedback.current
   var isSearchExpanded by remember { mutableStateOf(false) }
+  var showCreateFolderDialog by remember { mutableStateOf(false) }
+  var pendingAssignConversationId by remember { mutableStateOf<String?>(null) }
+  var moveFolderTargetConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var collapsedFolderIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+  val folderIds = remember(folders) { folders.map { it.id }.toSet() }
+  val isSearching = searchQuery.isNotBlank()
+
+  val pinnedConversations =
+    remember(conversations) { conversations.filter { it.isPinned } }
+  val unpinnedConversations =
+    remember(conversations) { conversations.filter { !it.isPinned } }
+  val recentConversations =
+    remember(unpinnedConversations, folderIds, isSearching) {
+      if (isSearching) unpinnedConversations
+      else unpinnedConversations.filter { it.folderId == null || it.folderId !in folderIds }
+    }
 
   ModalDrawerSheet(
     modifier = modifier.width(308.dp),
@@ -97,7 +140,8 @@ fun ChatDrawerContent(
     ) {
       // Header
       Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+        modifier =
+          Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
       ) {
@@ -201,16 +245,37 @@ fun ChatDrawerContent(
         Text(text = stringResource(R.string.chat_new))
       }
 
-      Spacer(modifier = Modifier.height(16.dp))
+      Spacer(modifier = Modifier.height(12.dp))
 
-      Text(
-        text = stringResource(R.string.chat_drawer_title),
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
-      )
+      // Section Header + Create Folder
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Text(
+          text = stringResource(R.string.chat_drawer_title),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        IconButton(
+          onClick = {
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            pendingAssignConversationId = null
+            showCreateFolderDialog = true
+          },
+          modifier = Modifier.size(48.dp).testTag("drawer_new_folder_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.CreateNewFolder,
+            contentDescription = stringResource(R.string.cd_create_folder),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+          )
+        }
+      }
 
-      if (conversations.isEmpty()) {
+      if (conversations.isEmpty() && (folders.isEmpty() || isSearching)) {
         Box(
           modifier = Modifier.weight(1f).fillMaxWidth().padding(24.dp),
           contentAlignment = Alignment.Center,
@@ -218,7 +283,7 @@ fun ChatDrawerContent(
           Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
               imageVector =
-                if (searchQuery.isNotBlank()) Icons.Rounded.Search
+                if (isSearching) Icons.Rounded.Search
                 else Icons.Rounded.ChatBubbleOutline,
               contentDescription = null,
               tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
@@ -227,7 +292,7 @@ fun ChatDrawerContent(
             Spacer(modifier = Modifier.height(10.dp))
             Text(
               text =
-                if (searchQuery.isNotBlank()) stringResource(R.string.chat_drawer_search_empty)
+                if (isSearching) stringResource(R.string.chat_drawer_search_empty)
                 else stringResource(R.string.chat_drawer_empty),
               style = MaterialTheme.typography.bodyMedium,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -236,33 +301,92 @@ fun ChatDrawerContent(
         }
       } else {
         LazyColumn(
-          modifier = Modifier.weight(1f),
-          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+          modifier = Modifier.weight(1f).testTag("drawer_conversations_list"),
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
           verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-          items(
-            items = conversations,
-            key = { it.id },
-            contentType = { "conversation" },
-          ) { conversation ->
-            val onSelect =
-              remember(conversation.id, onSelectConversation) {
-                { onSelectConversation(conversation.id) }
+          if (pinnedConversations.isNotEmpty()) {
+            item(key = "section_pinned", contentType = "section_header") {
+              DrawerSectionLabel(
+                text = stringResource(R.string.chat_drawer_pinned),
+                modifier = Modifier.testTag("drawer_pinned_section"),
+              )
+            }
+            items(
+              items = pinnedConversations,
+              key = { "pinned_${it.id}" },
+              contentType = { "conversation" },
+            ) { conversation ->
+              DrawerConversationRow(
+                conversation = conversation,
+                isSelected = conversation.id == activeConversationId,
+                onSelectConversation = onSelectConversation,
+                onDeleteConversation = onDeleteConversation,
+                onTogglePinConversation = onTogglePinConversation,
+                onRequestMoveFolder = { moveFolderTargetConversation = conversation },
+              )
+            }
+          }
+
+          if (!isSearching && folders.isNotEmpty()) {
+            folders.forEach { folder ->
+              val folderConvs = unpinnedConversations.filter { it.folderId == folder.id }
+              val isExpanded = folder.id !in collapsedFolderIds
+              item(key = "folder_${folder.id}", contentType = "folder_header") {
+                DrawerFolderHeader(
+                  folder = folder,
+                  count = folderConvs.size,
+                  isExpanded = isExpanded,
+                  onToggle = {
+                    collapsedFolderIds =
+                      if (isExpanded) collapsedFolderIds + folder.id
+                      else collapsedFolderIds - folder.id
+                  },
+                )
               }
-            val onDelete =
-              remember(conversation.id, onDeleteConversation) {
-                {
-                  haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                  onDeleteConversation(conversation.id)
+              if (isExpanded && folderConvs.isNotEmpty()) {
+                items(
+                  items = folderConvs,
+                  key = { "folder_${folder.id}_${it.id}" },
+                  contentType = { "conversation" },
+                ) { conversation ->
+                  DrawerConversationRow(
+                    conversation = conversation,
+                    isSelected = conversation.id == activeConversationId,
+                    onSelectConversation = onSelectConversation,
+                    onDeleteConversation = onDeleteConversation,
+                    onTogglePinConversation = onTogglePinConversation,
+                    onRequestMoveFolder = { moveFolderTargetConversation = conversation },
+                    indentForFolder = true,
+                  )
                 }
               }
+            }
+          }
 
-            DrawerConversationItem(
-              conversation = conversation,
-              isSelected = conversation.id == activeConversationId,
-              onClick = onSelect,
-              onDelete = onDelete,
-            )
+          if (recentConversations.isNotEmpty()) {
+            if (!isSearching && (pinnedConversations.isNotEmpty() || folders.isNotEmpty())) {
+              item(key = "section_recent", contentType = "section_header") {
+                DrawerSectionLabel(
+                  text = stringResource(R.string.chat_drawer_recent),
+                  modifier = Modifier.testTag("drawer_recent_section"),
+                )
+              }
+            }
+            items(
+              items = recentConversations,
+              key = { it.id },
+              contentType = { "conversation" },
+            ) { conversation ->
+              DrawerConversationRow(
+                conversation = conversation,
+                isSelected = conversation.id == activeConversationId,
+                onSelectConversation = onSelectConversation,
+                onDeleteConversation = onDeleteConversation,
+                onTogglePinConversation = onTogglePinConversation,
+                onRequestMoveFolder = { moveFolderTargetConversation = conversation },
+              )
+            }
           }
         }
       }
@@ -299,15 +423,154 @@ fun ChatDrawerContent(
       }
     }
   }
+
+  val targetConvForFolder = moveFolderTargetConversation
+  if (targetConvForFolder != null) {
+    FolderPickerSheet(
+      conversation = targetConvForFolder,
+      folders = folders,
+      onSelectFolder = { folderId ->
+        onMoveConversationToFolder(targetConvForFolder.id, folderId)
+        moveFolderTargetConversation = null
+      },
+      onCreateNewFolderClick = {
+        pendingAssignConversationId = targetConvForFolder.id
+        moveFolderTargetConversation = null
+        showCreateFolderDialog = true
+      },
+      onDeleteFolder = onDeleteFolder,
+      onDismiss = { moveFolderTargetConversation = null },
+    )
+  }
+
+  if (showCreateFolderDialog) {
+    CreateFolderDialog(
+      onCreate = { name ->
+        onCreateFolder(name, pendingAssignConversationId)
+        pendingAssignConversationId = null
+        showCreateFolderDialog = false
+      },
+      onDismiss = {
+        pendingAssignConversationId = null
+        showCreateFolderDialog = false
+      },
+    )
+  }
 }
 
+@Composable
+private fun DrawerSectionLabel(
+  text: String,
+  modifier: Modifier = Modifier,
+) {
+  Text(
+    text = text,
+    style = MaterialTheme.typography.labelSmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+  )
+}
+
+@Composable
+private fun DrawerFolderHeader(
+  folder: FolderEntity,
+  count: Int,
+  isExpanded: Boolean,
+  onToggle: () -> Unit,
+) {
+  Surface(
+    onClick = onToggle,
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    modifier =
+      Modifier.fillMaxWidth()
+        .heightIn(min = 48.dp)
+        .testTag("drawer_folder_header_${folder.id}"),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Icon(
+        imageVector = Icons.Outlined.Folder,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(18.dp),
+      )
+      Text(
+        text = folder.name,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f),
+      )
+      Text(
+        text = count.toString(),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      Icon(
+        imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(18.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun DrawerConversationRow(
+  conversation: ConversationEntity,
+  isSelected: Boolean,
+  onSelectConversation: (String) -> Unit,
+  onDeleteConversation: (String) -> Unit,
+  onTogglePinConversation: (String, Boolean) -> Unit,
+  onRequestMoveFolder: () -> Unit,
+  indentForFolder: Boolean = false,
+) {
+  val haptic = LocalHapticFeedback.current
+  val onSelect =
+    remember(conversation.id, onSelectConversation) { { onSelectConversation(conversation.id) } }
+  val onDelete =
+    remember(conversation.id, onDeleteConversation) {
+      {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        onDeleteConversation(conversation.id)
+      }
+    }
+  val onTogglePin =
+    remember(conversation.id, conversation.isPinned, onTogglePinConversation) {
+      { onTogglePinConversation(conversation.id, conversation.isPinned) }
+    }
+
+  DrawerConversationItem(
+    conversation = conversation,
+    isSelected = isSelected,
+    indentForFolder = indentForFolder,
+    onClick = onSelect,
+    onDelete = onDelete,
+    onTogglePin = onTogglePin,
+    onMoveToFolder = onRequestMoveFolder,
+  )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DrawerConversationItem(
   conversation: ConversationEntity,
   isSelected: Boolean,
+  indentForFolder: Boolean,
   onClick: () -> Unit,
   onDelete: () -> Unit,
+  onTogglePin: () -> Unit,
+  onMoveToFolder: () -> Unit,
 ) {
+  val haptic = LocalHapticFeedback.current
+  var showMenu by remember { mutableStateOf(false) }
+
   val dismissState =
     rememberSwipeToDismissBoxState(
       confirmValueChange = { value ->
@@ -365,52 +628,306 @@ private fun DrawerConversationItem(
       if (isSelected) MaterialTheme.colorScheme.surfaceContainerHigh
       else MaterialTheme.colorScheme.surface
 
-    Surface(
-      onClick = onClick,
-      shape = RoundedCornerShape(16.dp),
-      color = containerColor,
+    Box(modifier = Modifier.fillMaxWidth().padding(start = if (indentForFolder) 10.dp else 0.dp)) {
+      Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = containerColor,
+        modifier =
+          Modifier.fillMaxWidth()
+            .heightIn(min = 54.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .combinedClickable(
+              onClick = onClick,
+              onLongClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                showMenu = true
+              },
+            )
+            .testTag("drawer_conversation_${conversation.id}"),
+      ) {
+        Column(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+          verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            if (conversation.branchedFromConversationId != null) {
+              Icon(
+                imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+                contentDescription = stringResource(R.string.cd_branched_conversation),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(14.dp).testTag("branched_conversation_icon"),
+              )
+            }
+            Text(
+              text = conversation.title,
+              style = MaterialTheme.typography.bodyMedium,
+              color =
+                if (isSelected) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
+            )
+            if (conversation.isPinned) {
+              Icon(
+                imageVector = Icons.Rounded.PushPin,
+                contentDescription = stringResource(R.string.cd_pin_conversation),
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(14.dp).testTag("pinned_conversation_icon"),
+              )
+            }
+          }
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Text(
+              text = providerName,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+              text = "•",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+              text = relativeTime,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+            )
+          }
+        }
+      }
+
+      DropdownMenu(
+        expanded = showMenu,
+        onDismissRequest = { showMenu = false },
+        modifier = Modifier.testTag("drawer_conversation_menu_${conversation.id}"),
+      ) {
+        DropdownMenuItem(
+          text = {
+            Text(
+              text =
+                if (conversation.isPinned) stringResource(R.string.chat_drawer_unpin)
+                else stringResource(R.string.chat_drawer_pin)
+            )
+          },
+          leadingIcon = { Icon(imageVector = Icons.Rounded.PushPin, contentDescription = null) },
+          onClick = {
+            showMenu = false
+            onTogglePin()
+          },
+          modifier = Modifier.testTag("drawer_option_pin"),
+        )
+        DropdownMenuItem(
+          text = { Text(stringResource(R.string.chat_drawer_move_folder)) },
+          leadingIcon = {
+            Icon(imageVector = Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null)
+          },
+          onClick = {
+            showMenu = false
+            onMoveToFolder()
+          },
+          modifier = Modifier.testTag("drawer_option_move_folder"),
+        )
+        DropdownMenuItem(
+          text = { Text(stringResource(R.string.chat_drawer_delete)) },
+          leadingIcon = {
+            Icon(
+              imageVector = Icons.Outlined.DeleteOutline,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.error,
+            )
+          },
+          onClick = {
+            showMenu = false
+            onDelete()
+          },
+          modifier = Modifier.testTag("drawer_option_delete"),
+        )
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FolderPickerSheet(
+  conversation: ConversationEntity,
+  folders: List<FolderEntity>,
+  onSelectFolder: (String?) -> Unit,
+  onCreateNewFolderClick: () -> Unit,
+  onDeleteFolder: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.surface,
+  ) {
+    Column(
       modifier =
         Modifier.fillMaxWidth()
-          .heightIn(min = 54.dp)
-          .testTag("drawer_conversation_${conversation.id}"),
+          .padding(horizontal = 16.dp)
+          .padding(bottom = 24.dp)
+          .testTag("folder_picker_sheet"),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      Column(
-        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+      Text(
+        text = stringResource(R.string.chat_folder_picker_title),
+        style = MaterialTheme.typography.titleLarge,
+      )
+
+      Surface(
+        onClick = { onSelectFolder(null) },
+        shape = RoundedCornerShape(14.dp),
+        color =
+          if (conversation.folderId == null) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+          else MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("folder_option_unfiled"),
       ) {
-        Text(
-          text = conversation.title,
-          style = MaterialTheme.typography.bodyMedium,
-          color =
-            if (isSelected) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
         Row(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
           verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
           Text(
-            text = providerName,
-            style = MaterialTheme.typography.labelSmall,
+            text = stringResource(R.string.chat_folder_unfiled),
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.weight(1f),
+          )
+          if (conversation.folderId == null) {
+            Icon(
+              imageVector = Icons.Rounded.Check,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+            )
+          }
+        }
+      }
+
+      folders.forEach { folder ->
+        val isSelected = conversation.folderId == folder.id
+        Surface(
+          onClick = { onSelectFolder(folder.id) },
+          shape = RoundedCornerShape(14.dp),
+          color =
+            if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+            else MaterialTheme.colorScheme.surfaceContainer,
+          modifier =
+            Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("folder_option_${folder.id}"),
+        ) {
+          Row(
+            modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.Folder,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+              modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+              text = folder.name,
+              style = MaterialTheme.typography.titleSmall,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f),
+            )
+            if (isSelected) {
+              Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+              )
+            }
+            IconButton(
+              onClick = { onDeleteFolder(folder.id) },
+              modifier = Modifier.size(48.dp).testTag("delete_folder_${folder.id}"),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.DeleteOutline,
+                contentDescription = stringResource(R.string.cd_delete_folder),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+              )
+            }
+          }
+        }
+      }
+
+      Surface(
+        onClick = onCreateNewFolderClick,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("folder_option_new"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.CreateNewFolder,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp),
+          )
+          Text(
+            text = stringResource(R.string.chat_folder_new_option),
+            style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.primary,
-          )
-          Text(
-            text = "•",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
-          Text(
-            text = relativeTime,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
           )
         }
       }
     }
   }
+}
+
+@Composable
+private fun CreateFolderDialog(
+  onCreate: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  var folderName by remember { mutableStateOf("") }
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.chat_folder_create_title)) },
+    text = {
+      OutlinedTextField(
+        value = folderName,
+        onValueChange = { folderName = it },
+        label = { Text(stringResource(R.string.chat_folder_name_label)) },
+        placeholder = { Text(stringResource(R.string.chat_folder_name_placeholder)) },
+        singleLine = true,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth().testTag("new_folder_name_input"),
+      )
+    },
+    confirmButton = {
+      TextButton(
+        onClick = { onCreate(folderName) },
+        enabled = folderName.isNotBlank(),
+        modifier = Modifier.heightIn(min = 48.dp).testTag("confirm_create_folder_button"),
+      ) {
+        Text(stringResource(R.string.chat_folder_create_action))
+      }
+    },
+    dismissButton = {
+      TextButton(
+        onClick = onDismiss,
+        modifier = Modifier.heightIn(min = 48.dp),
+      ) {
+        Text(stringResource(R.string.action_cancel))
+      }
+    },
+  )
 }
 
 private fun formatRelativeTimestamp(timestampMs: Long): String {

@@ -32,6 +32,13 @@ data class GenerationMetaState(
   val streamingMessageId: String? = null,
 )
 
+@Immutable
+data class SuggestedRepliesState(
+  val conversationId: String? = null,
+  val messageId: String? = null,
+  val replies: List<String> = emptyList(),
+)
+
 data class GenerationRequest(
   val conversationId: String,
   val conversationTitle: String,
@@ -46,6 +53,7 @@ data class GenerationRequest(
   val activeSkillName: String?,
   val shouldAutoTitle: Boolean,
   val firstUserPrompt: String,
+  val includeSuggestedReplies: Boolean = true,
 )
 
 private sealed interface ThrottledStreamEvent {
@@ -82,10 +90,14 @@ class AiGenerationCoordinator(
   private val _streamingText = MutableStateFlow("")
   val streamingText: StateFlow<String> = _streamingText.asStateFlow()
 
+  private val _suggestedReplies = MutableStateFlow(SuggestedRepliesState())
+  val suggestedReplies: StateFlow<SuggestedRepliesState> = _suggestedReplies.asStateFlow()
+
   @Volatile private var activeJob: Job? = null
   @Volatile private var pendingRunData: ActiveRunData? = null
   @Volatile private var latestPartialText: String = ""
   @Volatile private var serviceCallbacks: ServiceCallbacks? = null
+  @Volatile private var latestRunToken: Long = 0L
 
   interface ServiceCallbacks {
     fun onCompleted(conversationId: String, conversationTitle: String, isError: Boolean)
@@ -110,6 +122,7 @@ class AiGenerationCoordinator(
    */
   suspend fun startGeneration(request: GenerationRequest) {
     cancelInternal(savePartial = false)
+    clearSuggestedReplies()
 
     val placeholder =
       repository.insertAssistantPlaceholder(
@@ -118,6 +131,8 @@ class AiGenerationCoordinator(
         activeSkillName = request.activeSkillName,
       )
 
+    val runToken = System.nanoTime()
+    latestRunToken = runToken
     latestPartialText = ""
     _streamingText.value = ""
     _generationMeta.value =
@@ -253,6 +268,26 @@ class AiGenerationCoordinator(
                         systemPrompt = req.systemPrompt,
                       )
                     }
+                    if (req.includeSuggestedReplies) {
+                      launchSuggestedReplies(
+                        runToken = latestRunToken,
+                        conversationId = req.conversationId,
+                        messageId = placeholderId,
+                        provider = req.provider,
+                        modelId = req.modelId,
+                        apiKey = apiKey,
+                        historyWithReply =
+                          req.history +
+                            MessageEntity(
+                              id = placeholderId,
+                              conversationId = req.conversationId,
+                              role = MessageEntity.ROLE_ASSISTANT,
+                              content = finalText,
+                              modelId = req.modelId,
+                              createdAt = System.currentTimeMillis(),
+                            ),
+                      )
+                    }
                   } else if (event.extractedMemories.isNotEmpty()) {
                     repository.updateAssistantMessage(
                       messageId = placeholderId,
@@ -342,12 +377,17 @@ class AiGenerationCoordinator(
     cancelInternal(savePartial = true)
   }
 
+  fun clearSuggestedReplies() {
+    _suggestedReplies.value = SuggestedRepliesState()
+  }
+
   private fun cancelInternal(savePartial: Boolean) {
     val currentMeta = _generationMeta.value
     val placeholderId = currentMeta.streamingMessageId
     val convId = currentMeta.conversationId
     val partial = MemoryPromptHelper.stripStreamingTags(latestPartialText).trim()
 
+    latestRunToken = System.nanoTime()
     pendingRunData = null
     activeJob?.cancel()
     activeJob = null
@@ -388,6 +428,34 @@ class AiGenerationCoordinator(
         )
       if (!generated.isNullOrBlank()) {
         repository.updateConversationTitle(conversationId, generated)
+      }
+    }
+  }
+
+  private fun launchSuggestedReplies(
+    runToken: Long,
+    conversationId: String,
+    messageId: String,
+    provider: AiProvider,
+    modelId: String,
+    apiKey: String,
+    historyWithReply: List<MessageEntity>,
+  ) {
+    scope.launch {
+      val suggestions =
+        repository.generateSuggestedReplies(
+          provider = provider,
+          modelId = modelId,
+          apiKey = apiKey,
+          history = historyWithReply,
+        )
+      if (suggestions.isNotEmpty() && latestRunToken == runToken) {
+        _suggestedReplies.value =
+          SuggestedRepliesState(
+            conversationId = conversationId,
+            messageId = messageId,
+            replies = suggestions,
+          )
       }
     }
   }

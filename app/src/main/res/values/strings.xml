@@ -25,6 +25,15 @@
     <string name="cd_attach_files">Attach camera, photos, or files</string>
     <string name="cd_remove_attachment">Remove %1$s</string>
     <string name="cd_select_skill">Select skill</string>
+    <string name="cd_voice_input">Voice input</string>
+    <string name="cd_stop_listening">Stop listening</string>
+    <string name="cd_read_aloud">Read aloud</string>
+    <string name="cd_stop_speaking">Stop speaking</string>
+    <string name="cd_branch_conversation">Branch from here</string>
+    <string name="cd_create_folder">New folder</string>
+    <string name="cd_delete_folder">Delete folder</string>
+    <string name="cd_pin_conversation">Pinned</string>
+    <string name="cd_branched_conversation">Branched conversation</string>
 
     <!-- Onboarding -->
     <string name="onboarding_skip">Skip</string>
@@ -76,6 +85,31 @@
     <string name="chat_copied_full">Full conversation copied</string>
     <string name="chat_copied_message">Copied to clipboard</string>
     <string name="chat_stopped">Generation stopped</string>
+    <string name="chat_listening">Listening…</string>
+    <string name="chat_mic_permission_denied">Microphone permission is needed for voice input. You can enable it in system settings.</string>
+    <string name="chat_speech_unavailable">Speech recognition is not available on this device</string>
+    <string name="chat_speech_no_match">No speech detected. Please try again.</string>
+    <string name="chat_speech_error">Voice input error. Please try again.</string>
+    <string name="chat_tts_unavailable">Text-to-speech is not available on this device</string>
+    <string name="chat_tts_lang_unavailable">Text-to-speech is not available for %1$s on this device</string>
+    <string name="action_speak">Listen</string>
+    <string name="action_stop_speaking">Stop</string>
+    <string name="action_branch">Branch</string>
+    <string name="chat_branched_from">Branched from %1$s</string>
+    <string name="chat_branched_feedback">Created branch: %1$s</string>
+    <string name="chat_drawer_pinned">Pinned</string>
+    <string name="chat_drawer_recent">Recent</string>
+    <string name="chat_drawer_pin">Pin</string>
+    <string name="chat_drawer_unpin">Unpin</string>
+    <string name="chat_drawer_move_folder">Move to folder…</string>
+    <string name="chat_drawer_delete">Delete</string>
+    <string name="chat_folder_create_title">New folder</string>
+    <string name="chat_folder_name_label">Folder name</string>
+    <string name="chat_folder_name_placeholder">e.g. Work, Study, Ideas</string>
+    <string name="chat_folder_create_action">Create</string>
+    <string name="chat_folder_picker_title">Move to folder</string>
+    <string name="chat_folder_unfiled">No folder (Unfiled)</string>
+    <string name="chat_folder_new_option">+ New folder</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
@@ -116,6 +150,8 @@
     <string name="settings_skills_title">Skills</string>
     <string name="settings_skills_subtitle">Custom markdown playbooks (%1$d active)</string>
     <string name="cd_open_skills">Open skills management</string>
+    <string name="settings_suggested_replies_title">Show suggested replies</string>
+    <string name="settings_suggested_replies_subtitle">Display quick follow-up prompt chips after AI responses</string>
 
     <!-- Memory -->
     <string name="memory_title">Memory</string>

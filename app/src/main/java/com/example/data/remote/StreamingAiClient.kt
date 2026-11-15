@@ -252,6 +252,104 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
         .getOrNull()
     }
 
+  /**
+   * Generates 2-3 concise follow-up questions/replies after an assistant response completes,
+   * failing silently with an empty list so it never delays or blocks primary streaming output.
+   */
+  suspend fun generateSuggestedReplies(
+    provider: AiProvider,
+    modelId: String,
+    apiKey: String,
+    history: List<MessageEntity>,
+  ): List<String> =
+    withContext(Dispatchers.IO) {
+      if (apiKey.isBlank() || history.isEmpty()) return@withContext emptyList()
+
+      val snippet =
+        history
+          .filter { !it.isError && it.content.isNotBlank() }
+          .takeLast(4)
+          .joinToString("\n\n") { msg ->
+            val label = if (msg.role == MessageEntity.ROLE_USER) "User" else "Assistant"
+            "$label: ${msg.content.trim().take(450)}"
+          }
+      if (snippet.isBlank()) return@withContext emptyList()
+
+      val prompt =
+        "Based on this conversation, suggest 2 to 3 short, helpful follow-up questions or replies " +
+          "the user might tap next. Output ONLY the 2 to 3 suggestions, one per line, under 60 " +
+          "characters each, with no numbering, bullets, quotes, or extra commentary.\n\n$snippet"
+
+      val syntheticHistory =
+        listOf(
+          MessageEntity(
+            id = "followups_prompt",
+            conversationId = "followups",
+            role = MessageEntity.ROLE_USER,
+            content = prompt,
+            createdAt = 0L,
+          )
+        )
+
+      val request =
+        when (provider) {
+          AiProvider.GEMINI ->
+            buildGeminiRequest(
+              modelId = modelId,
+              apiKey = apiKey,
+              history = syntheticHistory,
+              stream = false,
+              includeAccuracyAndMemory = false,
+            )
+          AiProvider.OPENROUTER ->
+            buildOpenRouterRequest(
+              modelId = modelId,
+              apiKey = apiKey,
+              history = syntheticHistory,
+              stream = false,
+              includeAccuracyAndMemory = false,
+            )
+        }
+
+      runCatching {
+          okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@use emptyList()
+            val raw = response.body?.string().orEmpty()
+            val extracted =
+              when (provider) {
+                AiProvider.GEMINI -> parseGeminiSsePayload(raw).text
+                AiProvider.OPENROUTER -> {
+                  val root = JSONObject(raw)
+                  root
+                    .optJSONArray("choices")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content")
+                }
+              }
+            parseSuggestedRepliesText(extracted.orEmpty())
+          }
+        }
+        .getOrElse { emptyList() }
+    }
+
+  internal fun parseSuggestedRepliesText(rawText: String): List<String> {
+    if (rawText.isBlank()) return emptyList()
+    return rawText
+      .lineSequence()
+      .map { line ->
+        line
+          .trim()
+          .replace(LIST_PREFIX_REGEX, "")
+          .trim('"', '\'', ' ')
+          .replace(WHITESPACE_REGEX, " ")
+      }
+      .filter { it.length in 3..80 }
+      .distinct()
+      .take(3)
+      .toList()
+  }
+
   internal fun buildGeminiRequest(
     modelId: String,
     apiKey: String,
@@ -557,6 +655,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
   private companion object {
     val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     val WHITESPACE_REGEX = Regex("\\s+")
+    val LIST_PREFIX_REGEX = Regex("^(?:[-*•]+|\\d+[.)])\\s*")
 
     // Note: Actual model behavior ultimately depends on which underlying model is selected
     // (e.g., Gemini vs. an OpenRouter-routed Claude or GPT model). This baseline instruction

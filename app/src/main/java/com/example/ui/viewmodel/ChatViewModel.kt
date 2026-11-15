@@ -5,6 +5,7 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.FolderEntity
 import com.example.data.local.entity.MessageEntity
 import com.example.data.local.entity.MessageWithAttachments
 import com.example.data.local.entity.SkillEntity
@@ -16,8 +17,11 @@ import com.example.data.repository.DeletedConversationBackup
 import com.example.data.util.AttachmentPrepareResult
 import com.example.data.util.AttachmentTypes
 import com.example.data.util.PendingAttachment
+import com.example.data.util.SpeechAndTtsUtils
 import com.example.service.AiGenerationCoordinator
+import com.example.service.GenerationMetaState
 import com.example.service.GenerationRequest
+import com.example.service.SuggestedRepliesState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -47,8 +51,10 @@ import kotlinx.coroutines.launch
 @Immutable
 data class ChatUiState(
   val conversations: List<ConversationEntity> = emptyList(),
+  val folders: List<FolderEntity> = emptyList(),
   val activeConversationId: String? = null,
   val activeTitle: String = "Ved",
+  val branchedFromTitle: String? = null,
   val messages: List<MessageWithAttachments> = emptyList(),
   val streamingMessageId: String? = null,
   val isGenerating: Boolean = false,
@@ -59,6 +65,8 @@ data class ChatUiState(
   val pendingAttachments: List<PendingAttachment> = emptyList(),
   val enabledSkills: List<SkillEntity> = emptyList(),
   val pinnedSkillId: String? = null,
+  val suggestedReplies: List<String> = emptyList(),
+  val suggestedRepliesMessageId: String? = null,
 ) {
   val pinnedSkill: SkillEntity?
     get() = pinnedSkillId?.let { id -> enabledSkills.firstOrNull { it.id == id } }
@@ -169,14 +177,24 @@ class ChatViewModel(
         initialValue = emptyList(),
       )
 
+  private val foldersFlow =
+    repository
+      .observeFolders()
+      .stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = emptyList(),
+      )
+
   private val composerMetaFlow =
     combine(
       generationCoordinator.generationMeta,
       _editingMessageId,
       _pendingAttachments,
       _pinnedSkillId,
-    ) { genMeta, editingId, attachments, pinnedSkillId ->
-      ComposerMeta(genMeta, editingId, attachments, pinnedSkillId)
+      generationCoordinator.suggestedReplies,
+    ) { genMeta, editingId, attachments, pinnedSkillId, suggestedReplies ->
+      ComposerMeta(genMeta, editingId, attachments, pinnedSkillId, suggestedReplies)
     }
 
   private val engineMetaFlow =
@@ -185,7 +203,9 @@ class ChatViewModel(
     }
 
   private val conversationListsFlow =
-    combine(drawerConversationsFlow, allConversationsFlow) { drawer, all -> drawer to all }
+    combine(drawerConversationsFlow, allConversationsFlow, foldersFlow) { drawer, all, folders ->
+      ConversationLists(drawer, all, folders)
+    }
 
   val uiState: StateFlow<ChatUiState> =
     combine(
@@ -195,8 +215,13 @@ class ChatViewModel(
         composerMetaFlow,
         engineMetaFlow,
       ) { convLists, activeId, messages, composer, engineMeta ->
-        val (drawerConversations, allConversations) = convLists
+        val drawerConversations = convLists.drawerConversations
+        val allConversations = convLists.allConversations
         val activeConv = allConversations.firstOrNull { it.id == activeId }
+        val branchedFromTitle =
+          activeConv?.branchedFromConversationId?.let { parentId ->
+            allConversations.firstOrNull { it.id == parentId }?.title ?: "previous conversation"
+          }
         val genMeta = composer.generationMeta
         val validPinnedSkillId =
           composer.pinnedSkillId?.takeIf { id -> engineMeta.enabledSkills.any { it.id == id } }
@@ -206,10 +231,28 @@ class ChatViewModel(
           } else {
             null
           }
+        val showSuggested = engineMeta.prefs.showSuggestedReplies
+        val suggestedState = composer.suggestedReplies
+        val lastMessageId = messages.lastOrNull()?.message?.id
+        val activeSuggested =
+          if (
+            showSuggested &&
+              !genMeta.isGenerating &&
+              activeId != null &&
+              suggestedState.conversationId == activeId &&
+              suggestedState.messageId != null &&
+              suggestedState.messageId == lastMessageId
+          ) {
+            suggestedState
+          } else {
+            null
+          }
         ChatUiState(
           conversations = drawerConversations,
+          folders = convLists.folders,
           activeConversationId = activeId,
           activeTitle = activeConv?.title ?: "Ved",
+          branchedFromTitle = branchedFromTitle,
           messages = messages,
           streamingMessageId = activeStreamingId,
           isGenerating = genMeta.isGenerating,
@@ -220,6 +263,8 @@ class ChatViewModel(
           pendingAttachments = composer.pendingAttachments,
           enabledSkills = engineMeta.enabledSkills,
           pinnedSkillId = validPinnedSkillId,
+          suggestedReplies = activeSuggested?.replies.orEmpty(),
+          suggestedRepliesMessageId = activeSuggested?.messageId,
         )
       }
       .stateIn(
@@ -230,6 +275,10 @@ class ChatViewModel(
 
   fun onInputChanged(value: String) {
     _inputText.value = value
+  }
+
+  fun appendVoiceTranscript(transcript: String) {
+    _inputText.value = SpeechAndTtsUtils.appendRecognizedSpeech(_inputText.value, transcript)
   }
 
   fun onSearchQueryChanged(query: String) {
@@ -315,6 +364,7 @@ class ChatViewModel(
       _editingMessageId.value = null
       _pendingAttachments.value = emptyList()
       _inputText.value = ""
+      generationCoordinator.clearSuggestedReplies()
     }
     _activeConversationId.value = conversationId
   }
@@ -323,6 +373,7 @@ class ChatViewModel(
     if (generationCoordinator.generationMeta.value.isGenerating) {
       generationCoordinator.stopGeneration()
     }
+    generationCoordinator.clearSuggestedReplies()
     _editingMessageId.value = null
     _pendingAttachments.value = emptyList()
     _inputText.value = ""
@@ -441,6 +492,7 @@ class ChatViewModel(
             activeSkillName = skillContext.activeSkillName,
             shouldAutoTitle = firstTurn,
             firstUserPrompt = titleSource,
+            includeSuggestedReplies = prefs.showSuggestedReplies,
           )
         }
 
@@ -518,6 +570,7 @@ class ChatViewModel(
             activeSkillName = skillContext.activeSkillName,
             shouldAutoTitle = updatedHistory.count { it.role == MessageEntity.ROLE_USER } == 1,
             firstUserPrompt = firstPrompt,
+            includeSuggestedReplies = prefs.showSuggestedReplies,
           )
         }
 
@@ -540,10 +593,50 @@ class ChatViewModel(
         _activeConversationId.value = null
         _editingMessageId.value = null
         _pendingAttachments.value = emptyList()
+        generationCoordinator.clearSuggestedReplies()
       }
       if (backup != null) {
         _events.tryEmit(ChatUiEvent.ConversationDeleted(backup))
       }
+    }
+  }
+
+  fun togglePinConversation(conversationId: String, currentlyPinned: Boolean) {
+    viewModelScope.launch { repository.setConversationPinned(conversationId, !currentlyPinned) }
+  }
+
+  fun createFolder(name: String, assignConversationId: String? = null) {
+    val trimmed = name.trim()
+    if (trimmed.isEmpty()) return
+    viewModelScope.launch {
+      val created = repository.createFolder(trimmed)
+      if (created != null && assignConversationId != null) {
+        repository.moveConversationToFolder(assignConversationId, created.id)
+      }
+    }
+  }
+
+  fun deleteFolder(folderId: String) {
+    viewModelScope.launch { repository.deleteFolder(folderId) }
+  }
+
+  fun moveConversationToFolder(conversationId: String, folderId: String?) {
+    viewModelScope.launch { repository.moveConversationToFolder(conversationId, folderId) }
+  }
+
+  fun branchFromMessage(messageId: String) {
+    val sourceConvId = _activeConversationId.value ?: return
+    if (generationCoordinator.generationMeta.value.isGenerating) {
+      generationCoordinator.stopGeneration()
+    }
+    viewModelScope.launch {
+      val branched = repository.branchConversation(sourceConvId, messageId) ?: return@launch
+      generationCoordinator.clearSuggestedReplies()
+      _editingMessageId.value = null
+      _pendingAttachments.value = emptyList()
+      _inputText.value = ""
+      _activeConversationId.value = branched.id
+      _events.tryEmit(ChatUiEvent.ShowMessage("Created branch: ${branched.title}"))
     }
   }
 
@@ -583,11 +676,18 @@ class ChatViewModel(
     return if (cleaned.length <= 42) cleaned else cleaned.take(40).trimEnd() + "…"
   }
 
+  private data class ConversationLists(
+    val drawerConversations: List<ConversationEntity>,
+    val allConversations: List<ConversationEntity>,
+    val folders: List<FolderEntity>,
+  )
+
   private data class ComposerMeta(
-    val generationMeta: com.example.service.GenerationMetaState,
+    val generationMeta: GenerationMetaState,
     val editingMessageId: String?,
     val pendingAttachments: List<PendingAttachment>,
     val pinnedSkillId: String?,
+    val suggestedReplies: SuggestedRepliesState,
   )
 
   private data class EngineMeta(

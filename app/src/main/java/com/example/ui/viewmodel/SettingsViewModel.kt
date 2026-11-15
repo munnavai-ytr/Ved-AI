@@ -43,6 +43,7 @@ data class SettingsUiState(
   val openRouterKeySource: KeySource = KeySource.MISSING,
   val enabledSkillsCount: Int = 0,
   val totalSkillsCount: Int = 0,
+  val showSuggestedReplies: Boolean = true,
   val isBackupBusy: Boolean = false,
   val feedbackMessage: String? = null,
 ) {
@@ -154,6 +155,7 @@ class SettingsViewModel(
           openRouterKeySource = keySources.second,
           enabledSkillsCount = statusMeta.enabledSkillsCount,
           totalSkillsCount = statusMeta.totalSkillsCount,
+          showSuggestedReplies = prefs.showSuggestedReplies,
           isBackupBusy = statusMeta.isBackupBusy,
           feedbackMessage = statusMeta.feedbackMessage,
         )
@@ -189,6 +191,10 @@ class SettingsViewModel(
 
   fun setThemeMode(mode: ThemeMode) {
     viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
+  }
+
+  fun setShowSuggestedReplies(enabled: Boolean) {
+    viewModelScope.launch { preferencesRepository.setShowSuggestedReplies(enabled) }
   }
 
   fun saveSystemPrompt(prompt: String) {
