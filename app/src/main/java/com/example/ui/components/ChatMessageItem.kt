@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
@@ -43,10 +45,13 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
+import com.example.data.util.AttachmentTypes
 import com.example.data.util.ImageProcessor
 import com.example.ui.theme.LocalVedColors
 import kotlinx.coroutines.delay
@@ -59,6 +64,7 @@ import kotlinx.coroutines.flow.StateFlow
 @Composable
 fun StreamingChatMessageItem(
   message: MessageEntity,
+  attachments: List<MessageAttachmentEntity> = emptyList(),
   streamingTextFlow: StateFlow<String>,
   isLastAssistantMessage: Boolean,
   onRegenerate: () -> Unit,
@@ -67,6 +73,7 @@ fun StreamingChatMessageItem(
   val streamedText by streamingTextFlow.collectAsStateWithLifecycle()
   ChatMessageItem(
     message = message,
+    attachments = attachments,
     displayContent = streamedText,
     isStreaming = true,
     isLastAssistantMessage = isLastAssistantMessage,
@@ -76,12 +83,14 @@ fun StreamingChatMessageItem(
 }
 
 /**
- * Renders a single user or assistant chat turn with markdown, image thumbnails, edit, copy,
- * regenerate, and token usage controls.
+ * Renders a single user or assistant chat turn with markdown, multi-file attachments (image
+ * thumbnails, PDF chips, text file chips), skill activation pill, edit, copy, regenerate, and
+ * token usage controls.
  */
 @Composable
 fun ChatMessageItem(
   message: MessageEntity,
+  attachments: List<MessageAttachmentEntity> = emptyList(),
   displayContent: String,
   isStreaming: Boolean,
   isLastAssistantMessage: Boolean,
@@ -93,7 +102,8 @@ fun ChatMessageItem(
   if (message.role == MessageEntity.ROLE_USER) {
     UserMessageBubble(
       content = displayContent,
-      imageUri = message.imageUri,
+      legacyImageUri = message.imageUri,
+      attachments = attachments,
       canEdit = canEdit,
       onEdit = onEditMessage,
       modifier = modifier,
@@ -102,6 +112,7 @@ fun ChatMessageItem(
     AssistantMessageBlock(
       content = displayContent,
       modelId = message.modelId,
+      activeSkillName = message.activeSkillName,
       isError = message.isError,
       isStreaming = isStreaming,
       canRegenerate = isLastAssistantMessage && !isStreaming,
@@ -115,7 +126,8 @@ fun ChatMessageItem(
 @Composable
 private fun UserMessageBubble(
   content: String,
-  imageUri: String?,
+  legacyImageUri: String?,
+  attachments: List<MessageAttachmentEntity>,
   canEdit: Boolean,
   onEdit: (() -> Unit)?,
   modifier: Modifier = Modifier,
@@ -143,9 +155,18 @@ private fun UserMessageBubble(
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        if (!imageUri.isNullOrBlank()) {
-          MessageImageThumbnail(uriString = imageUri)
+        if (attachments.isNotEmpty()) {
+          attachments.forEach { att ->
+            when (att.type) {
+              AttachmentTypes.IMAGE -> MessageImageThumbnail(pathOrUri = att.localPath)
+              AttachmentTypes.PDF,
+              AttachmentTypes.TEXT -> MessageFileAttachmentChip(attachment = att)
+            }
+          }
+        } else if (!legacyImageUri.isNullOrBlank()) {
+          MessageImageThumbnail(pathOrUri = legacyImageUri)
         }
+
         if (content.isNotBlank()) {
           Text(
             text = content,
@@ -179,11 +200,11 @@ private fun UserMessageBubble(
 }
 
 @Composable
-private fun MessageImageThumbnail(uriString: String) {
+private fun MessageImageThumbnail(pathOrUri: String) {
   val context = LocalContext.current
   val bitmap by
-    produceState<Bitmap?>(initialValue = null, key1 = uriString) {
-      value = ImageProcessor.loadThumbnailBitmap(context, uriString, maxPx = 640)
+    produceState<Bitmap?>(initialValue = null, key1 = pathOrUri) {
+      value = ImageProcessor.loadThumbnailBitmap(context, pathOrUri, maxPx = 640)
     }
 
   val loaded = bitmap
@@ -202,9 +223,54 @@ private fun MessageImageThumbnail(uriString: String) {
 }
 
 @Composable
+private fun MessageFileAttachmentChip(attachment: MessageAttachmentEntity) {
+  val isPdf = attachment.type == AttachmentTypes.PDF
+  Surface(
+    shape = RoundedCornerShape(12.dp),
+    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+    modifier = Modifier.fillMaxWidth().testTag("user_message_file_chip"),
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Icon(
+        imageVector = if (isPdf) Icons.Outlined.PictureAsPdf else Icons.Outlined.Description,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(18.dp),
+      )
+      Text(
+        text = attachment.displayName,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f),
+      )
+      if (isPdf) {
+        Surface(
+          shape = RoundedCornerShape(6.dp),
+          color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+          Text(
+            text = stringResource(R.string.chat_attachment_pdf_badge),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
 private fun AssistantMessageBlock(
   content: String,
   modelId: String?,
+  activeSkillName: String?,
   isError: Boolean,
   isStreaming: Boolean,
   canRegenerate: Boolean,
@@ -231,7 +297,7 @@ private fun AssistantMessageBlock(
         .padding(horizontal = 16.dp, vertical = 10.dp),
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    // Subtle speaker header
+    // Subtle speaker header + optional skill pill
     Row(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -247,7 +313,26 @@ private fun AssistantMessageBlock(
           text = modelDisplayName,
           style = MaterialTheme.typography.labelSmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.weight(1f, fill = false),
         )
+      }
+      if (!activeSkillName.isNullOrBlank()) {
+        Surface(
+          shape = RoundedCornerShape(8.dp),
+          color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+          modifier = Modifier.testTag("message_skill_pill"),
+        ) {
+          Text(
+            text = stringResource(R.string.chat_skill_pill, activeSkillName),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+          )
+        }
       }
     }
 

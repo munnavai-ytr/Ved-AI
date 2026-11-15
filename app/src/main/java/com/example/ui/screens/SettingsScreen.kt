@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.Psychology
@@ -96,6 +97,7 @@ fun SettingsScreen(
   viewModel: SettingsViewModel,
   onNavigateBack: () -> Unit,
   onOpenMemory: () -> Unit = {},
+  onOpenSkills: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -235,7 +237,10 @@ fun SettingsScreen(
               GeminiModelDropdown(
                 selectedModelId = uiState.geminiModel,
                 models = uiState.geminiModels,
+                isLoading = uiState.isLoadingGeminiModels,
+                errorMessage = uiState.geminiModelsError,
                 onSelectModel = viewModel::setModel,
+                onRefresh = { viewModel.refreshGeminiModels(forceRefresh = true) },
               )
             } else {
               OpenRouterModelTrigger(
@@ -326,6 +331,51 @@ fun SettingsScreen(
               Icon(
                 imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = stringResource(R.string.cd_open_memory),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
+
+        // 5. Skills
+        item {
+          Surface(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onOpenSkills()
+            },
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("settings_skills_row"),
+          ) {
+            Row(
+              modifier = Modifier.padding(18.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.AutoAwesome,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp),
+              )
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = stringResource(R.string.settings_skills_title),
+                  style = MaterialTheme.typography.titleMedium,
+                  color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                  text = stringResource(R.string.settings_skills_subtitle, uiState.enabledSkillsCount),
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+              Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = stringResource(R.string.cd_open_skills),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
               )
             }
@@ -470,58 +520,102 @@ private fun SettingsSectionCard(
 private fun GeminiModelDropdown(
   selectedModelId: String,
   models: List<AiModelInfo>,
+  isLoading: Boolean,
+  errorMessage: String?,
   onSelectModel: (String) -> Unit,
+  onRefresh: () -> Unit,
 ) {
   var expanded by remember { mutableStateOf(false) }
   val selectedModel = models.firstOrNull { it.id == selectedModelId }
 
-  ExposedDropdownMenuBox(
-    expanded = expanded,
-    onExpandedChange = { expanded = !expanded },
-  ) {
-    OutlinedTextField(
-      value = selectedModel?.name ?: selectedModelId,
-      onValueChange = {},
-      readOnly = true,
-      trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-      shape = RoundedCornerShape(16.dp),
-      modifier =
-        Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable)
-          .fillMaxWidth()
-          .testTag("gemini_model_dropdown"),
-    )
-
-    ExposedDropdownMenu(
-      expanded = expanded,
-      onDismissRequest = { expanded = false },
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      models.forEach { model ->
-        DropdownMenuItem(
-          text = {
-            Column {
-              Text(text = model.name, style = MaterialTheme.typography.bodyLarge)
-              Text(
-                text = model.id,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
+      ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded },
+        modifier = Modifier.weight(1f),
+      ) {
+        OutlinedTextField(
+          value = selectedModel?.name ?: selectedModelId,
+          onValueChange = {},
+          readOnly = true,
+          supportingText = {
+            Text(
+              text =
+                if (isLoading) stringResource(R.string.settings_loading_gemini_models)
+                else stringResource(R.string.settings_models_count, models.size),
+              style = MaterialTheme.typography.labelSmall,
+            )
           },
-          trailingIcon = {
-            if (model.id == selectedModelId) {
-              Icon(
-                imageVector = Icons.Rounded.Check,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-              )
-            }
-          },
-          onClick = {
-            onSelectModel(model.id)
-            expanded = false
-          },
+          trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+          shape = RoundedCornerShape(16.dp),
+          modifier =
+            Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable)
+              .fillMaxWidth()
+              .testTag("gemini_model_dropdown"),
         )
+
+        ExposedDropdownMenu(
+          expanded = expanded,
+          onDismissRequest = { expanded = false },
+        ) {
+          models.forEach { model ->
+            DropdownMenuItem(
+              text = {
+                Column {
+                  Text(text = model.name, style = MaterialTheme.typography.bodyLarge)
+                  Text(
+                    text = model.id,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+                }
+              },
+              trailingIcon = {
+                if (model.id == selectedModelId) {
+                  Icon(
+                    imageVector = Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                  )
+                }
+              },
+              onClick = {
+                onSelectModel(model.id)
+                expanded = false
+              },
+            )
+          }
+        }
       }
+
+      IconButton(
+        onClick = onRefresh,
+        enabled = !isLoading,
+        modifier = Modifier.size(48.dp).testTag("refresh_gemini_models_button"),
+      ) {
+        if (isLoading) {
+          CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        } else {
+          Icon(
+            imageVector = Icons.Rounded.Refresh,
+            contentDescription = stringResource(R.string.cd_refresh_models),
+          )
+        }
+      }
+    }
+
+    if (!errorMessage.isNullOrBlank()) {
+      Text(
+        text = errorMessage,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.testTag("gemini_models_error"),
+      )
     }
   }
 }

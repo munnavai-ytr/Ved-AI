@@ -35,6 +35,7 @@ data class MessageEntity(
   val imageUri: String? = null,
   val promptTokens: Int? = null,
   val completionTokens: Int? = null,
+  val activeSkillName: String? = null,
 ) {
   companion object {
     const val ROLE_USER = "user"

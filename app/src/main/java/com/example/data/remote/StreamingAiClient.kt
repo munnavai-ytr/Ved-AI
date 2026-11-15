@@ -1,7 +1,10 @@
 package com.example.data.remote
 
+import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
 import com.example.data.model.AiProvider
+import com.example.data.util.AttachmentProcessor
+import com.example.data.util.AttachmentTypes
 import com.example.data.util.MemoryPromptHelper
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
@@ -43,7 +46,12 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     history: List<MessageEntity>,
     systemPrompt: String = "",
     memoryContext: String = "",
+    skillsIndexBlock: String = "",
+    activeSkillBlock: String = "",
     imageBase64ByUri: Map<String, String> = emptyMap(),
+    attachmentsByMessageId: Map<String, List<MessageAttachmentEntity>> = emptyMap(),
+    binaryBase64ByPath: Map<String, String> = emptyMap(),
+    textContentByPath: Map<String, String> = emptyMap(),
   ): Flow<StreamChunk> = callbackFlow {
     var activeCall: okhttp3.Call? = null
 
@@ -60,8 +68,13 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                   stream = true,
                   systemPrompt = systemPrompt,
                   memoryContext = memoryContext,
+                  skillsIndexBlock = skillsIndexBlock,
+                  activeSkillBlock = activeSkillBlock,
                   includeAccuracyAndMemory = true,
                   imageBase64ByUri = imageBase64ByUri,
+                  attachmentsByMessageId = attachmentsByMessageId,
+                  binaryBase64ByPath = binaryBase64ByPath,
+                  textContentByPath = textContentByPath,
                 )
               AiProvider.OPENROUTER ->
                 buildOpenRouterRequest(
@@ -71,7 +84,11 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                   stream = true,
                   systemPrompt = systemPrompt,
                   memoryContext = memoryContext,
+                  skillsIndexBlock = skillsIndexBlock,
+                  activeSkillBlock = activeSkillBlock,
                   includeAccuracyAndMemory = true,
+                  attachmentsByMessageId = attachmentsByMessageId,
+                  textContentByPath = textContentByPath,
                 )
             }
 
@@ -242,8 +259,13 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     stream: Boolean,
     systemPrompt: String = "",
     memoryContext: String = "",
+    skillsIndexBlock: String = "",
+    activeSkillBlock: String = "",
     includeAccuracyAndMemory: Boolean = true,
     imageBase64ByUri: Map<String, String> = emptyMap(),
+    attachmentsByMessageId: Map<String, List<MessageAttachmentEntity>> = emptyMap(),
+    binaryBase64ByPath: Map<String, String> = emptyMap(),
+    textContentByPath: Map<String, String> = emptyMap(),
   ): Request {
     val action = if (stream) "streamGenerateContent?alt=sse" else "generateContent"
     val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelId:$action"
@@ -252,19 +274,40 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     for (msg in history) {
       if (msg.isError) continue
       val partsArray = JSONArray()
-      if (msg.content.isNotBlank()) {
-        partsArray.put(JSONObject().put("text", msg.content))
+      val msgAttachments = attachmentsByMessageId[msg.id].orEmpty()
+
+      val combinedText = buildMessageTextWithTextAttachments(msg.content, msgAttachments, textContentByPath)
+      if (combinedText.isNotBlank()) {
+        partsArray.put(JSONObject().put("text", combinedText))
       }
-      val imageBase64 = msg.imageUri?.let { imageBase64ByUri[it] }
-      if (!imageBase64.isNullOrBlank()) {
-        partsArray.put(
-          JSONObject()
-            .put(
-              "inlineData",
-              JSONObject().put("mimeType", "image/jpeg").put("data", imageBase64),
-            )
-        )
+
+      if (msgAttachments.isNotEmpty()) {
+        for (att in msgAttachments) {
+          if (att.type == AttachmentTypes.IMAGE || att.type == AttachmentTypes.PDF) {
+            val base64 = binaryBase64ByPath[att.localPath]
+            if (!base64.isNullOrBlank()) {
+              val mime = if (att.type == AttachmentTypes.PDF) "application/pdf" else "image/jpeg"
+              partsArray.put(
+                JSONObject()
+                  .put("inlineData", JSONObject().put("mimeType", mime).put("data", base64))
+              )
+            }
+          }
+        }
+      } else {
+        // Legacy fallback when attachments list is empty but imageUri exists
+        val imageBase64 = msg.imageUri?.let { imageBase64ByUri[it] ?: binaryBase64ByPath[it] }
+        if (!imageBase64.isNullOrBlank()) {
+          partsArray.put(
+            JSONObject()
+              .put(
+                "inlineData",
+                JSONObject().put("mimeType", "image/jpeg").put("data", imageBase64),
+              )
+          )
+        }
       }
+
       if (partsArray.length() == 0) continue
 
       val role = if (msg.role == MessageEntity.ROLE_USER) "user" else "model"
@@ -276,6 +319,8 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       resolveSystemInstruction(
         customSystemPrompt = systemPrompt,
         memoryContext = memoryContext,
+        skillsIndexBlock = skillsIndexBlock,
+        activeSkillBlock = activeSkillBlock,
         includeAccuracyAndMemory = includeAccuracyAndMemory,
       )
     if (finalSystemInstruction.isNotEmpty()) {
@@ -302,13 +347,19 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     stream: Boolean,
     systemPrompt: String = "",
     memoryContext: String = "",
+    skillsIndexBlock: String = "",
+    activeSkillBlock: String = "",
     includeAccuracyAndMemory: Boolean = true,
+    attachmentsByMessageId: Map<String, List<MessageAttachmentEntity>> = emptyMap(),
+    textContentByPath: Map<String, String> = emptyMap(),
   ): Request {
     val messagesArray = JSONArray()
     val finalSystemInstruction =
       resolveSystemInstruction(
         customSystemPrompt = systemPrompt,
         memoryContext = memoryContext,
+        skillsIndexBlock = skillsIndexBlock,
+        activeSkillBlock = activeSkillBlock,
         includeAccuracyAndMemory = includeAccuracyAndMemory,
       )
     if (finalSystemInstruction.isNotEmpty()) {
@@ -316,9 +367,16 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     }
 
     for (msg in history) {
-      if (msg.isError || msg.content.isBlank()) continue
+      if (msg.isError) continue
+      val combinedText =
+        buildMessageTextWithTextAttachments(
+          msg.content,
+          attachmentsByMessageId[msg.id].orEmpty(),
+          textContentByPath,
+        )
+      if (combinedText.isBlank()) continue
       val role = if (msg.role == MessageEntity.ROLE_USER) "user" else "assistant"
-      messagesArray.put(JSONObject().put("role", role).put("content", msg.content))
+      messagesArray.put(JSONObject().put("role", role).put("content", combinedText))
     }
 
     val payload =
@@ -338,9 +396,38 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       .build()
   }
 
+  private fun buildMessageTextWithTextAttachments(
+    baseContent: String,
+    attachments: List<MessageAttachmentEntity>,
+    textContentByPath: Map<String, String>,
+  ): String {
+    val textBlocks =
+      attachments
+        .filter { it.type == AttachmentTypes.TEXT }
+        .mapNotNull { att ->
+          val content = textContentByPath[att.localPath]
+          if (content != null) {
+            AttachmentProcessor.formatTextAttachmentForPrompt(att.displayName, content)
+          } else {
+            null
+          }
+        }
+    if (textBlocks.isEmpty()) return baseContent
+
+    return buildString {
+      if (baseContent.isNotBlank()) {
+        append(baseContent.trimEnd())
+        append("\n\n")
+      }
+      append(textBlocks.joinToString(separator = "\n\n"))
+    }
+  }
+
   private fun resolveSystemInstruction(
     customSystemPrompt: String,
     memoryContext: String,
+    skillsIndexBlock: String,
+    activeSkillBlock: String,
     includeAccuracyAndMemory: Boolean,
   ): String {
     return if (includeAccuracyAndMemory) {
@@ -348,6 +435,8 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
         customSystemPrompt = customSystemPrompt,
         memoryContextBlock = memoryContext,
         leadingInstruction = ACCURACY_SYSTEM_INSTRUCTION,
+        skillsIndexBlock = skillsIndexBlock,
+        activeSkillBlock = activeSkillBlock,
       )
     } else {
       customSystemPrompt.trim()

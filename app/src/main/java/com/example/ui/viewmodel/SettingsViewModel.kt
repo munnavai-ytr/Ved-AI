@@ -7,7 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.model.AiModelInfo
 import com.example.data.model.AiProvider
-import com.example.data.model.DefaultGeminiModels
+import com.example.data.model.FallbackGeminiModels
 import com.example.data.model.FallbackOpenRouterModels
 import com.example.data.model.ThemeMode
 import com.example.data.preferences.UserPreferences
@@ -27,11 +27,13 @@ import kotlinx.coroutines.withContext
 @Immutable
 data class SettingsUiState(
   val activeProvider: AiProvider = AiProvider.GEMINI,
-  val geminiModel: String = DefaultGeminiModels.first().id,
+  val geminiModel: String = FallbackGeminiModels.first().id,
   val openRouterModel: String = FallbackOpenRouterModels.first().id,
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
   val systemPrompt: String = "",
-  val geminiModels: List<AiModelInfo> = DefaultGeminiModels,
+  val geminiModels: List<AiModelInfo> = FallbackGeminiModels,
+  val isLoadingGeminiModels: Boolean = false,
+  val geminiModelsError: String? = null,
   val openRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
   val filteredOpenRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
   val isLoadingOpenRouterModels: Boolean = false,
@@ -39,6 +41,8 @@ data class SettingsUiState(
   val modelSearchQuery: String = "",
   val geminiKeySource: KeySource = KeySource.MISSING,
   val openRouterKeySource: KeySource = KeySource.MISSING,
+  val enabledSkillsCount: Int = 0,
+  val totalSkillsCount: Int = 0,
   val isBackupBusy: Boolean = false,
   val feedbackMessage: String? = null,
 ) {
@@ -51,13 +55,18 @@ data class SettingsUiState(
 }
 
 /**
- * ViewModel for provider switching, dynamic OpenRouter model discovery, theme selection,
- * custom system instructions, backup export/import, and Keystore-encrypted API key overrides.
+ * ViewModel for provider switching, dynamic Gemini & OpenRouter model discovery, theme selection,
+ * custom system instructions, backup export/import, skills summary, and Keystore-encrypted API key
+ * overrides.
  */
 class SettingsViewModel(
   private val repository: ChatRepository,
   private val preferencesRepository: UserPreferencesRepository,
 ) : ViewModel() {
+
+  private val _geminiModels = MutableStateFlow(FallbackGeminiModels)
+  private val _isLoadingGeminiModels = MutableStateFlow(false)
+  private val _geminiModelsError = MutableStateFlow<String?>(null)
 
   private val _openRouterModels = MutableStateFlow(FallbackOpenRouterModels)
   private val _isLoadingModels = MutableStateFlow(false)
@@ -79,7 +88,15 @@ class SettingsViewModel(
         repository.getKeySource(AiProvider.GEMINI) to repository.getKeySource(AiProvider.OPENROUTER)
       }
 
-  private val modelsMetaFlow =
+  private val geminiCatalogFlow =
+    combine(_geminiModels, _isLoadingGeminiModels, _geminiModelsError) {
+      models,
+      loading,
+      error ->
+      GeminiCatalogState(models, loading, error)
+    }
+
+  private val openRouterCatalogFlow =
     combine(_openRouterModels, _isLoadingModels, _modelsError, _searchQuery) {
         models,
         loading,
@@ -92,35 +109,53 @@ class SettingsViewModel(
             models.filter {
               it.name.contains(q, ignoreCase = true) || it.id.contains(q, ignoreCase = true)
             }
-        ModelCatalogState(models, filtered, loading, error, query)
+        OpenRouterCatalogState(models, filtered, loading, error, query)
       }
       .flowOn(Dispatchers.Default)
 
+  private val modelsMetaFlow =
+    combine(geminiCatalogFlow, openRouterCatalogFlow) { gemini, openRouter -> gemini to openRouter }
+
+  private val skillsCountFlow =
+    repository.observeSkills().combine(_isBackupBusy) { skills, _ ->
+      skills.count { it.isEnabled } to skills.size
+    }
+
   private val statusMetaFlow =
-    combine(_isBackupBusy, _feedbackMessage) { backupBusy, feedback -> backupBusy to feedback }
+    combine(_isBackupBusy, _feedbackMessage, skillsCountFlow) {
+      backupBusy,
+      feedback,
+      skillsCount ->
+      StatusMeta(backupBusy, feedback, skillsCount.first, skillsCount.second)
+    }
 
   val uiState: StateFlow<SettingsUiState> =
     combine(prefsFlow, modelsMetaFlow, keyStatusesFlow, statusMetaFlow) {
         prefs,
-        catalog,
+        catalogs,
         keySources,
         statusMeta ->
+        val (geminiCatalog, openRouterCatalog) = catalogs
         SettingsUiState(
           activeProvider = prefs.activeProvider,
           geminiModel = prefs.geminiModel,
           openRouterModel = prefs.openRouterModel,
           themeMode = prefs.themeMode,
           systemPrompt = prefs.systemPrompt,
-          geminiModels = DefaultGeminiModels,
-          openRouterModels = catalog.models,
-          filteredOpenRouterModels = catalog.filteredModels,
-          isLoadingOpenRouterModels = catalog.isLoading,
-          openRouterModelsError = catalog.error,
-          modelSearchQuery = catalog.query,
+          geminiModels = geminiCatalog.models,
+          isLoadingGeminiModels = geminiCatalog.isLoading,
+          geminiModelsError = geminiCatalog.error,
+          openRouterModels = openRouterCatalog.models,
+          filteredOpenRouterModels = openRouterCatalog.filteredModels,
+          isLoadingOpenRouterModels = openRouterCatalog.isLoading,
+          openRouterModelsError = openRouterCatalog.error,
+          modelSearchQuery = openRouterCatalog.query,
           geminiKeySource = keySources.first,
           openRouterKeySource = keySources.second,
-          isBackupBusy = statusMeta.first,
-          feedbackMessage = statusMeta.second,
+          enabledSkillsCount = statusMeta.enabledSkillsCount,
+          totalSkillsCount = statusMeta.totalSkillsCount,
+          isBackupBusy = statusMeta.isBackupBusy,
+          feedbackMessage = statusMeta.feedbackMessage,
         )
       }
       .stateIn(
@@ -130,11 +165,17 @@ class SettingsViewModel(
       )
 
   init {
+    refreshGeminiModels(forceRefresh = false)
     refreshOpenRouterModels()
   }
 
   fun setProvider(provider: AiProvider) {
-    viewModelScope.launch { preferencesRepository.setActiveProvider(provider) }
+    viewModelScope.launch {
+      preferencesRepository.setActiveProvider(provider)
+      if (provider == AiProvider.GEMINI) {
+        refreshGeminiModels(forceRefresh = false)
+      }
+    }
   }
 
   fun setModel(modelId: String) {
@@ -211,6 +252,41 @@ class SettingsViewModel(
     _searchQuery.value = query
   }
 
+  fun refreshGeminiModels(forceRefresh: Boolean = true) {
+    if (_isLoadingGeminiModels.value) return
+    viewModelScope.launch {
+      val apiKey = repository.getEffectiveKey(AiProvider.GEMINI)
+      if (apiKey.isBlank()) {
+        _geminiModels.value = FallbackGeminiModels
+        _geminiModelsError.value = null
+        return@launch
+      }
+
+      _isLoadingGeminiModels.value = true
+      _geminiModelsError.value = null
+      repository
+        .fetchGeminiModels(apiKey = apiKey, forceRefresh = forceRefresh)
+        .onSuccess { models ->
+          _geminiModels.value = models
+          // If the currently stored model is no longer in the live list, auto-select the top
+          // available model (unless it's a fallback-only session).
+          val currentPrefs = repository.getCurrentPreferences()
+          if (models.isNotEmpty() && models.none { it.id == currentPrefs.geminiModel }) {
+            val preferredDefault =
+              models.firstOrNull { it.id == "gemini-flash-latest" } ?: models.first()
+            preferencesRepository.setGeminiModel(preferredDefault.id)
+          }
+        }
+        .onFailure { err ->
+          _geminiModelsError.value = err.message ?: "Could not load Gemini models."
+          if (_geminiModels.value.isEmpty()) {
+            _geminiModels.value = FallbackGeminiModels
+          }
+        }
+      _isLoadingGeminiModels.value = false
+    }
+  }
+
   fun refreshOpenRouterModels() {
     if (_isLoadingModels.value) return
     viewModelScope.launch {
@@ -232,6 +308,9 @@ class SettingsViewModel(
       if (trimmed.isEmpty()) return@launch
       repository.setOverrideKey(provider, trimmed)
       _feedbackMessage.value = "${provider.displayName} encrypted key saved"
+      if (provider == AiProvider.GEMINI) {
+        refreshGeminiModels(forceRefresh = true)
+      }
     }
   }
 
@@ -239,6 +318,9 @@ class SettingsViewModel(
     viewModelScope.launch {
       repository.clearOverrideKey(provider)
       _feedbackMessage.value = "${provider.displayName} local override removed"
+      if (provider == AiProvider.GEMINI) {
+        refreshGeminiModels(forceRefresh = true)
+      }
     }
   }
 
@@ -246,11 +328,24 @@ class SettingsViewModel(
     _feedbackMessage.value = null
   }
 
-  private data class ModelCatalogState(
+  private data class GeminiCatalogState(
+    val models: List<AiModelInfo>,
+    val isLoading: Boolean,
+    val error: String?,
+  )
+
+  private data class OpenRouterCatalogState(
     val models: List<AiModelInfo>,
     val filteredModels: List<AiModelInfo>,
     val isLoading: Boolean,
     val error: String?,
     val query: String,
+  )
+
+  private data class StatusMeta(
+    val isBackupBusy: Boolean,
+    val feedbackMessage: String?,
+    val enabledSkillsCount: Int,
+    val totalSkillsCount: Int,
   )
 }

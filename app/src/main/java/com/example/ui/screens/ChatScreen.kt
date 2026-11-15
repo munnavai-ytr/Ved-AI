@@ -1,9 +1,10 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.content.Intent
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
@@ -19,16 +20,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
@@ -41,6 +46,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
@@ -52,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -76,7 +83,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.entity.MessageEntity
+import com.example.data.local.entity.SkillEntity
 import com.example.data.model.AiProvider
+import com.example.service.VedNotifications
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
@@ -98,8 +107,8 @@ private val SuggestedPrompts =
 
 /**
  * Primary chat screen with history drawer & search, isolated streaming markdown messages,
- * user message editing, Gemini multimodal photo picker, suggested prompts, copy/share export,
- * and fixed bottom input bar.
+ * user message editing, multi-file attachments (images, PDFs, plain text/code), skill selector,
+ * suggested prompts, copy/share export, and notification permission prompt on first generation.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -120,13 +129,51 @@ fun ChatScreen(
   val clipboard = LocalClipboardManager.current
   val haptic = LocalHapticFeedback.current
   var showShareMenu by remember { mutableStateOf(false) }
+  var showSkillPicker by remember { mutableStateOf(false) }
+  var askedNotificationPermission by remember { mutableStateOf(false) }
+  var pendingSendAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
-  val photoPickerLauncher =
+  val notificationPermissionLauncher =
     rememberLauncherForActivityResult(
-      contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-      if (uri != null) {
-        viewModel.attachImage(uri)
+      contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+      pendingSendAction?.invoke()
+      pendingSendAction = null
+    }
+
+  val documentPickerLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+      if (uris.isNotEmpty()) {
+        for (uri in uris) {
+          try {
+            context.contentResolver.takePersistableUriPermission(
+              uri,
+              Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+          } catch (_: SecurityException) {
+            // Transient URI grant still valid long enough for AttachmentProcessor IO copy
+          }
+        }
+        viewModel.attachFiles(uris)
+      }
+    }
+
+  val runAfterNotificationPrompt =
+    remember(context, notificationPermissionLauncher) {
+      { action: () -> Unit ->
+        if (
+          Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !VedNotifications.canPostNotifications(context) &&
+            !askedNotificationPermission
+        ) {
+          askedNotificationPermission = true
+          pendingSendAction = action
+          notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+          action()
+        }
       }
     }
 
@@ -189,9 +236,7 @@ fun ChatScreen(
     }
   }
 
-  // Throttled, layout-aware scroll adjustment during active streaming: runs only while
-  // generating, never restarts per token, and only scrolls when the last item actually grows
-  // past the bottom viewport edge while the user is near the bottom.
+  // Throttled, layout-aware scroll adjustment during active streaming
   LaunchedEffect(uiState.isGenerating) {
     if (!uiState.isGenerating) return@LaunchedEffect
 
@@ -221,14 +266,13 @@ fun ChatScreen(
             listState.scrollBy(overflowPx.toFloat())
           }
         }
-        // Cap auto-scroll adjustments to ~5 Hz so layout passes stay smooth on low-end devices.
         delay(180L)
       }
   }
 
   val lastAssistantIndex =
     remember(uiState.messages) {
-      uiState.messages.indexOfLast { it.role == MessageEntity.ROLE_ASSISTANT }
+      uiState.messages.indexOfLast { it.message.role == MessageEntity.ROLE_ASSISTANT }
     }
 
   val activeModelChipText =
@@ -236,20 +280,27 @@ fun ChatScreen(
 
   val isGeminiActive = uiState.activeProvider == AiProvider.GEMINI
 
-  val onRegenerate = remember(viewModel) { { viewModel.regenerateLastResponse() } }
-  val onSend = remember(viewModel) { { viewModel.sendMessage() } }
+  val onRegenerate =
+    remember(viewModel, runAfterNotificationPrompt) {
+      { runAfterNotificationPrompt { viewModel.regenerateLastResponse() } }
+    }
+  val onSend =
+    remember(viewModel, runAfterNotificationPrompt) {
+      { runAfterNotificationPrompt { viewModel.sendMessage() } }
+    }
   val onStop = remember(viewModel) { { viewModel.stopGeneration() } }
   val onCancelEdit = remember(viewModel) { { viewModel.cancelEditing() } }
-  val onRemoveImage = remember(viewModel) { { viewModel.clearAttachedImage() } }
-  val onAttachImageClick =
-    remember(isGeminiActive, photoPickerLauncher, viewModel) {
+  val onRemoveAttachment =
+    remember(viewModel) { { id: String -> viewModel.removePendingAttachment(id) } }
+  val onAttachFilesClick =
+    remember(isGeminiActive, documentPickerLauncher, viewModel) {
       {
         if (isGeminiActive) {
-          photoPickerLauncher.launch(
-            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+          documentPickerLauncher.launch(
+            arrayOf("image/*", "application/pdf", "text/*", "application/json", "*/*")
           )
         } else {
-          viewModel.notifyImageUnsupportedForOpenRouter()
+          viewModel.notifyAttachmentsUnsupportedForOpenRouter()
         }
       }
     }
@@ -424,7 +475,7 @@ fun ChatScreen(
             ChatEmptyState(
               onPromptSelected = { prompt ->
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                viewModel.sendMessage(prompt)
+                runAfterNotificationPrompt { viewModel.sendMessage(prompt) }
               },
               modifier = Modifier.fillMaxSize(),
             )
@@ -436,28 +487,31 @@ fun ChatScreen(
             ) {
               itemsIndexed(
                 items = uiState.messages,
-                key = { _, msg -> msg.id },
-                contentType = { _, msg -> msg.role },
-              ) { index, message ->
-                if (message.id == uiState.streamingMessageId) {
+                key = { _, item -> item.message.id },
+                contentType = { _, item -> item.message.role },
+              ) { index, item ->
+                val msg = item.message
+                if (msg.id == uiState.streamingMessageId) {
                   StreamingChatMessageItem(
-                    message = message,
+                    message = msg,
+                    attachments = item.attachments,
                     streamingTextFlow = viewModel.streamingText,
                     isLastAssistantMessage = index == lastAssistantIndex,
                     onRegenerate = onRegenerate,
                   )
                 } else {
                   val onEdit =
-                    remember(message, viewModel) {
-                      if (message.role == MessageEntity.ROLE_USER) {
-                        { viewModel.startEditingMessage(message) }
+                    remember(item, viewModel) {
+                      if (msg.role == MessageEntity.ROLE_USER) {
+                        { viewModel.startEditingMessage(item) }
                       } else {
                         null
                       }
                     }
                   ChatMessageItem(
-                    message = message,
-                    displayContent = message.content,
+                    message = msg,
+                    attachments = item.attachments,
+                    displayContent = msg.content,
                     isStreaming = false,
                     isLastAssistantMessage = index == lastAssistantIndex,
                     onRegenerate = onRegenerate,
@@ -478,11 +532,140 @@ fun ChatScreen(
           onStop = onStop,
           isEditing = uiState.editingMessageId != null,
           onCancelEdit = onCancelEdit,
-          pendingImageUri = uiState.pendingImageUri,
+          pendingAttachments = uiState.pendingAttachments,
           isGeminiActive = isGeminiActive,
-          onAttachImageClick = onAttachImageClick,
-          onRemoveImage = onRemoveImage,
+          onAttachFilesClick = onAttachFilesClick,
+          onRemoveAttachment = onRemoveAttachment,
+          hasEnabledSkills = uiState.enabledSkills.isNotEmpty(),
+          pinnedSkill = uiState.pinnedSkill,
+          onOpenSkillPicker = { showSkillPicker = true },
         )
+      }
+    }
+  }
+
+  if (showSkillPicker && uiState.enabledSkills.isNotEmpty()) {
+    SkillPickerSheet(
+      skills = uiState.enabledSkills,
+      pinnedSkillId = uiState.pinnedSkillId,
+      onSelectSkill = { skillId ->
+        viewModel.setPinnedSkill(skillId)
+        showSkillPicker = false
+      },
+      onDismiss = { showSkillPicker = false },
+    )
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SkillPickerSheet(
+  skills: List<SkillEntity>,
+  pinnedSkillId: String?,
+  onSelectSkill: (String?) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+  ModalBottomSheet(
+    onDismissRequest = onDismiss,
+    sheetState = sheetState,
+    containerColor = MaterialTheme.colorScheme.surface,
+  ) {
+    Column(
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Text(
+        text = stringResource(R.string.chat_skill_picker_title),
+        style = MaterialTheme.typography.titleLarge,
+      )
+
+      Surface(
+        onClick = { onSelectSkill(null) },
+        shape = RoundedCornerShape(14.dp),
+        color =
+          if (pinnedSkillId == null) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+          else MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.AutoAwesome,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp),
+          )
+          Spacer(modifier = Modifier.width(12.dp))
+          Column(modifier = Modifier.weight(1f)) {
+            Text(
+              text = stringResource(R.string.chat_skill_auto),
+              style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+              text = stringResource(R.string.chat_skill_picker_auto_desc),
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          if (pinnedSkillId == null) {
+            Icon(
+              imageVector = Icons.Rounded.Check,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+            )
+          }
+        }
+      }
+
+      LazyColumn(
+        modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        items(items = skills, key = { it.id }) { skill ->
+          val isSelected = skill.id == pinnedSkillId
+          Surface(
+            onClick = { onSelectSkill(skill.id) },
+            shape = RoundedCornerShape(14.dp),
+            color =
+              if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+              else MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+          ) {
+            Row(
+              modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = skill.name,
+                  style = MaterialTheme.typography.titleSmall,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+                if (skill.description.isNotBlank()) {
+                  Text(
+                    text = skill.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                }
+              }
+              if (isSelected) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                  imageVector = Icons.Rounded.Check,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.primary,
+                )
+              }
+            }
+          }
+        }
       }
     }
   }

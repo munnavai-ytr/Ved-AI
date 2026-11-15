@@ -9,7 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.model.AiProvider
-import com.example.data.model.DefaultGeminiModels
+import com.example.data.model.FallbackGeminiModels
 import com.example.data.model.FallbackOpenRouterModels
 import com.example.data.model.ThemeMode
 import kotlinx.coroutines.flow.Flow
@@ -23,7 +23,7 @@ private val Context.vedDataStore: DataStore<Preferences> by preferencesDataStore
 @Immutable
 data class UserPreferences(
   val activeProvider: AiProvider = AiProvider.GEMINI,
-  val geminiModel: String = DefaultGeminiModels.first().id,
+  val geminiModel: String = FallbackGeminiModels.first().id,
   val openRouterModel: String = FallbackOpenRouterModels.first().id,
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
   val onboardingCompleted: Boolean = false,
@@ -46,7 +46,7 @@ class UserPreferencesRepository(private val context: Context) {
     context.vedDataStore.data.map { prefs ->
       UserPreferences(
         activeProvider = AiProvider.fromId(prefs[KEY_ACTIVE_PROVIDER]),
-        geminiModel = prefs[KEY_GEMINI_MODEL] ?: DefaultGeminiModels.first().id,
+        geminiModel = prefs[KEY_GEMINI_MODEL] ?: FallbackGeminiModels.first().id,
         openRouterModel = prefs[KEY_OPENROUTER_MODEL] ?: FallbackOpenRouterModels.first().id,
         themeMode = ThemeMode.fromId(prefs[KEY_THEME_MODE]),
         onboardingCompleted = prefs[KEY_ONBOARDING_COMPLETED] ?: false,

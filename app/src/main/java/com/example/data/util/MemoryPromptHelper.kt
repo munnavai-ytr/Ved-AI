@@ -34,6 +34,8 @@ object MemoryPromptHelper {
     customSystemPrompt: String,
     memoryContextBlock: String,
     leadingInstruction: String = "",
+    skillsIndexBlock: String = "",
+    activeSkillBlock: String = "",
   ): String {
     val parts = buildList {
       val trimmedLeading = leadingInstruction.trim()
@@ -48,6 +50,14 @@ object MemoryPromptHelper {
       val trimmedMemory = memoryContextBlock.trim()
       if (trimmedMemory.isNotEmpty()) {
         add(trimmedMemory)
+      }
+      val trimmedSkillsIndex = skillsIndexBlock.trim()
+      if (trimmedSkillsIndex.isNotEmpty()) {
+        add(trimmedSkillsIndex)
+      }
+      val trimmedActiveSkill = activeSkillBlock.trim()
+      if (trimmedActiveSkill.isNotEmpty()) {
+        add(trimmedActiveSkill)
       }
     }
     return parts.joinToString(separator = "\n\n")

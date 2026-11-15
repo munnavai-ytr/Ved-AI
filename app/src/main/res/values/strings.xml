@@ -19,9 +19,12 @@
     <string name="cd_clear_search">Clear search</string>
     <string name="cd_edit_message">Edit message</string>
     <string name="cd_cancel_edit">Cancel editing</string>
-    <string name="cd_attach_image">Attach image</string>
-    <string name="cd_remove_image">Remove attached image</string>
+    <string name="cd_attach_image">Attach files</string>
+    <string name="cd_remove_image">Remove attachment</string>
     <string name="cd_attached_image">Attached image</string>
+    <string name="cd_attach_files">Attach images, PDFs, or text files</string>
+    <string name="cd_remove_attachment">Remove %1$s</string>
+    <string name="cd_select_skill">Select skill</string>
 
     <!-- Onboarding -->
     <string name="onboarding_skip">Skip</string>
@@ -48,8 +51,13 @@
     <string name="chat_new">New chat</string>
     <string name="chat_deleted">Conversation deleted</string>
     <string name="chat_editing_banner">Editing message</string>
-    <string name="chat_image_openrouter_unsupported">Image input is only supported with Gemini</string>
-    <string name="chat_image_attach_failed">Could not load selected image</string>
+    <string name="chat_image_openrouter_unsupported">File attachments are only supported with Gemini</string>
+    <string name="chat_image_attach_failed">Could not load selected file</string>
+    <string name="chat_attachment_pdf_badge">PDF</string>
+    <string name="chat_skill_pill">Skill: %1$s</string>
+    <string name="chat_skill_auto">Auto skill</string>
+    <string name="chat_skill_picker_title">Pin a skill</string>
+    <string name="chat_skill_picker_auto_desc">Automatically match based on your message</string>
     <string name="action_undo">Undo</string>
     <string name="action_copy">Copy</string>
     <string name="action_copied">Copied</string>
@@ -73,6 +81,7 @@
     <string name="settings_select_model">Select model</string>
     <string name="settings_search_models">Search OpenRouter models…</string>
     <string name="settings_loading_models">Fetching OpenRouter models…</string>
+    <string name="settings_loading_gemini_models">Fetching Gemini models…</string>
     <string name="settings_models_count">%1$d models available</string>
     <string name="settings_system_prompt_section">Custom instructions</string>
     <string name="settings_system_prompt_note">Applied as system instructions across new and existing chats.</string>
@@ -96,6 +105,9 @@
     <string name="settings_key_cleared">Local override removed</string>
     <string name="settings_memory_subtitle">Facts Ved remembers about you across all chats</string>
     <string name="cd_open_memory">Open memory management</string>
+    <string name="settings_skills_title">Skills</string>
+    <string name="settings_skills_subtitle">Custom markdown playbooks (%1$d active)</string>
+    <string name="cd_open_skills">Open skills management</string>
 
     <!-- Memory -->
     <string name="memory_title">Memory</string>
@@ -119,4 +131,38 @@
     <string name="cd_delete_memory">Delete memory</string>
     <string name="cd_save_memory">Save memory</string>
     <string name="action_cancel">Cancel</string>
+
+    <!-- Skills -->
+    <string name="skills_title">Skills</string>
+    <string name="skills_create_button">Create skill</string>
+    <string name="skills_import_button">Import skill</string>
+    <string name="skills_empty_title">No skills yet</string>
+    <string name="skills_empty_body">Create reusable instruction playbooks or import a Claude-style SKILL.md file so Ved automatically loads the right expertise when needed.</string>
+    <string name="skills_source_user">User</string>
+    <string name="skills_source_imported">Imported</string>
+    <string name="skills_files_count">%1$d ref files</string>
+    <string name="skills_editor_create_title">Create skill</string>
+    <string name="skills_editor_edit_title">Edit skill</string>
+    <string name="skills_name_label">Skill name</string>
+    <string name="skills_name_placeholder">e.g. Compose Animation Expert</string>
+    <string name="skills_desc_label">When to use (Description)</string>
+    <string name="skills_desc_placeholder">Use when helping with Jetpack Compose animations, transitions, or MotionLayout…</string>
+    <string name="skills_markdown_label">Skill instructions (Markdown)</string>
+    <string name="skills_markdown_placeholder">Step-by-step instructions, patterns, and checklists…</string>
+    <string name="skills_ref_files_section">Supporting files</string>
+    <string name="skills_add_ref_file">Attach reference file</string>
+    <string name="skills_import_review_hint">Imported markdown had incomplete YAML frontmatter — please confirm the name and description below.</string>
+    <string name="skills_save_button">Save skill</string>
+    <string name="cd_export_skill">Export skill as markdown</string>
+    <string name="cd_delete_skill">Delete skill</string>
+    <string name="cd_remove_ref_file">Remove reference file</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_ongoing_name">Active AI responses</string>
+    <string name="notification_channel_ongoing_desc">Shown silently while Ved generates a response in the background</string>
+    <string name="notification_channel_complete_name">Completed AI responses</string>
+    <string name="notification_channel_complete_desc">Notifies you when a background response is ready</string>
+    <string name="notification_generating_title">Ved is generating a response…</string>
+    <string name="notification_ready_body">Response ready in %1$s</string>
+    <string name="notification_error_body">Response finished with an error in %1$s</string>
 </resources>

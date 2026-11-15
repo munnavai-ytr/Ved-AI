@@ -28,13 +28,25 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import com.example.data.local.entity.MemoryEntity
+import com.example.data.local.entity.MessageAttachmentEntity
+import com.example.data.local.entity.MessageWithAttachments
+import com.example.data.local.entity.SkillEntity
+import com.example.data.local.entity.SkillFileEntity
+import com.example.data.local.entity.SkillWithFiles
 import com.example.data.model.ChatBackup
+import com.example.data.model.FallbackGeminiModels
 import com.example.data.preferences.UserPreferencesRepository
+import com.example.data.remote.GeminiApiService
+import com.example.data.remote.GeminiModelDto
 import com.example.data.remote.OpenRouterApiService
 import com.example.data.remote.StreamingAiClient
 import com.example.data.repository.ChatRepository
 import com.example.data.security.ApiKeyStore
+import com.example.data.util.AttachmentProcessor
+import com.example.data.util.AttachmentTypes
 import com.example.data.util.MemoryPromptHelper
+import com.example.data.util.SkillMatcher
+import com.example.service.VedNotifications
 import com.example.ui.screens.MemoryScreen
 import com.example.ui.viewmodel.MemoryViewModel
 import kotlinx.serialization.json.Json
@@ -172,7 +184,11 @@ class ExampleRobolectricTest {
 
     val migratedDb =
       Room.databaseBuilder(context, VedDatabase::class.java, dbName)
-        .addMigrations(VedDatabase.MIGRATION_1_2, VedDatabase.MIGRATION_2_3)
+        .addMigrations(
+          VedDatabase.MIGRATION_1_2,
+          VedDatabase.MIGRATION_2_3,
+          VedDatabase.MIGRATION_3_4,
+        )
         .build()
     try {
       val dao = migratedDb.chatDao()
@@ -412,7 +428,11 @@ class ExampleRobolectricTest {
 
     val migratedDb =
       Room.databaseBuilder(context, VedDatabase::class.java, dbName)
-        .addMigrations(VedDatabase.MIGRATION_1_2, VedDatabase.MIGRATION_2_3)
+        .addMigrations(
+          VedDatabase.MIGRATION_1_2,
+          VedDatabase.MIGRATION_2_3,
+          VedDatabase.MIGRATION_3_4,
+        )
         .build()
     try {
       val msgs = migratedDb.chatDao().getMessagesSync("c2")
@@ -531,14 +551,17 @@ class ExampleRobolectricTest {
     try {
       val fakeRetrofit =
         Retrofit.Builder().baseUrl("https://openrouter.ai/").client(OkHttpClient()).build()
-      val fakeApi = fakeRetrofit.create(OpenRouterApiService::class.java)
+      val fakeOpenRouterApi = fakeRetrofit.create(OpenRouterApiService::class.java)
+      val fakeGeminiApi = fakeRetrofit.create(GeminiApiService::class.java)
       val repo =
         ChatRepository(
           appContext = context,
           chatDao = db.chatDao(),
           memoryDao = db.memoryDao(),
+          skillDao = db.skillDao(),
           streamingClient = StreamingAiClient(OkHttpClient()),
-          openRouterApi = fakeApi,
+          geminiApi = fakeGeminiApi,
+          openRouterApi = fakeOpenRouterApi,
           apiKeyStore = ApiKeyStore(context),
           preferencesRepository = UserPreferencesRepository(context),
         )
@@ -726,7 +749,12 @@ class ExampleRobolectricTest {
     val uiStateFlow =
       MutableStateFlow(
         ChatUiState(
-          messages = listOf(settledUser, settledAssistant, streamingAssistant),
+          messages =
+            listOf(
+              MessageWithAttachments(settledUser),
+              MessageWithAttachments(settledAssistant),
+              MessageWithAttachments(streamingAssistant),
+            ),
           streamingMessageId = streamingAssistant.id,
           isGenerating = true,
         )
@@ -744,13 +772,15 @@ class ExampleRobolectricTest {
         LazyColumn {
           itemsIndexed(
             items = state.messages,
-            key = { _, m -> m.id },
-            contentType = { _, m -> m.role },
-          ) { _, message ->
+            key = { _, m -> m.message.id },
+            contentType = { _, m -> m.message.role },
+          ) { _, item ->
+            val message = item.message
             if (message.id == state.streamingMessageId) {
               SideEffect { streamingItemRecompositions++ }
               StreamingChatMessageItem(
                 message = message,
+                attachments = item.attachments,
                 streamingTextFlow = streamingTextFlow,
                 isLastAssistantMessage = true,
                 onRegenerate = stableRegenerate,
@@ -762,6 +792,7 @@ class ExampleRobolectricTest {
               }
               ChatMessageItem(
                 message = message,
+                attachments = item.attachments,
                 displayContent = message.content,
                 isStreaming = false,
                 isLastAssistantMessage = false,
@@ -801,5 +832,378 @@ class ExampleRobolectricTest {
       "Active streaming item should have updated (initial=$initialStreamingCount)",
       streamingItemRecompositions >= initialStreamingCount,
     )
+  }
+
+  @Test
+  fun `gemini model mapping filters generateContent strips prefix and fallback excludes deprecated ids`() {
+    val dtos =
+      listOf(
+        GeminiModelDto(
+          name = "models/embedding-001",
+          displayName = "Embedding 001",
+          supportedGenerationMethods = listOf("embedContent"),
+        ),
+        GeminiModelDto(
+          name = "models/gemini-3-flash-preview",
+          displayName = "Gemini 3 Flash Preview",
+          inputTokenLimit = 1_048_576,
+          supportedGenerationMethods = listOf("generateContent", "countTokens"),
+        ),
+        GeminiModelDto(
+          name = "models/gemini-flash-latest",
+          displayName = "Gemini Flash Latest",
+          inputTokenLimit = 1_048_576,
+          supportedGenerationMethods = listOf("generateContent"),
+        ),
+      )
+
+    val mapped = ChatRepository.mapGeminiModels(dtos)
+    assertEquals(2, mapped.size)
+    assertEquals("gemini-flash-latest", mapped[0].id)
+    assertEquals("gemini-3-flash-preview", mapped[1].id)
+    assertTrue(FallbackGeminiModels.none { it.id == "gemini-2.5-flash" })
+    assertTrue(FallbackGeminiModels.any { it.id == "gemini-flash-latest" })
+  }
+
+  @Test
+  fun `room migration 3 to 4 creates attachments and skills tables and migrates legacy imageUri`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val dbName = "migration_v3_v4_ved.db"
+      context.deleteDatabase(dbName)
+
+      val helper =
+        FrameworkSQLiteOpenHelperFactory()
+          .create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+              .name(dbName)
+              .callback(
+                object : SupportSQLiteOpenHelper.Callback(3) {
+                  override fun onCreate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                      """
+                      CREATE TABLE IF NOT EXISTS `conversations` (
+                        `id` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `provider` TEXT NOT NULL,
+                        `modelId` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                      )
+                      """.trimIndent()
+                    )
+                    db.execSQL(
+                      """
+                      CREATE TABLE IF NOT EXISTS `messages` (
+                        `id` TEXT NOT NULL,
+                        `conversationId` TEXT NOT NULL,
+                        `role` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        `modelId` TEXT,
+                        `isError` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `imageUri` TEXT,
+                        `promptTokens` INTEGER,
+                        `completionTokens` INTEGER,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`conversationId`) REFERENCES `conversations`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                      )
+                      """.trimIndent()
+                    )
+                    db.execSQL(
+                      "CREATE INDEX IF NOT EXISTS `index_messages_conversationId_createdAt` ON `messages` (`conversationId`, `createdAt`)"
+                    )
+                    db.execSQL(
+                      """
+                      CREATE TABLE IF NOT EXISTS `memories` (
+                        `id` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `source` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                      )
+                      """.trimIndent()
+                    )
+                    db.execSQL(
+                      "CREATE INDEX IF NOT EXISTS `index_memories_updatedAt` ON `memories` (`updatedAt`)"
+                    )
+                    db.execSQL(
+                      "INSERT INTO conversations VALUES ('c3', 'Image Chat', 'gemini', 'gemini-flash-latest', 300, 300)"
+                    )
+                    db.execSQL(
+                      "INSERT INTO messages VALUES ('m3', 'c3', 'user', 'Analyze photo', NULL, 0, 301, 'file:///legacy.jpg', NULL, NULL)"
+                    )
+                  }
+
+                  override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+                }
+              )
+              .build()
+          )
+      helper.writableDatabase.close()
+      helper.close()
+
+      val migratedDb =
+        Room.databaseBuilder(context, VedDatabase::class.java, dbName)
+          .addMigrations(
+            VedDatabase.MIGRATION_1_2,
+            VedDatabase.MIGRATION_2_3,
+            VedDatabase.MIGRATION_3_4,
+          )
+          .build()
+      try {
+        val withAttachments = migratedDb.chatDao().getMessagesWithAttachmentsSync("c3")
+        assertEquals(1, withAttachments.size)
+        assertEquals(1, withAttachments.first().attachments.size)
+        assertEquals("file:///legacy.jpg", withAttachments.first().attachments.first().localPath)
+        assertEquals(AttachmentTypes.IMAGE, withAttachments.first().attachments.first().type)
+
+        val skillDao = migratedDb.skillDao()
+        val skill =
+          SkillEntity(
+            id = "sk-1",
+            name = "Compose Expert",
+            description = "Use when writing Jetpack Compose layouts and animations",
+            skillMarkdown = "Always prefer Modifier parameters.",
+            isEnabled = true,
+            source = SkillEntity.SOURCE_USER,
+            createdAt = 10L,
+            updatedAt = 20L,
+          )
+        val file =
+          SkillFileEntity(
+            id = "sf-1",
+            skillId = "sk-1",
+            fileName = "rules.txt",
+            content = "Use 8dp spacing grid.",
+          )
+        skillDao.saveSkillWithFiles(skill, listOf(file))
+        val loaded = skillDao.getSkillWithFiles("sk-1")!!
+        assertEquals("Compose Expert", loaded.skill.name)
+        assertEquals(1, loaded.files.size)
+        assertEquals("rules.txt", loaded.files.first().fileName)
+      } finally {
+        migratedDb.close()
+        context.deleteDatabase(dbName)
+      }
+    }
+
+  @Test
+  fun `attachment processor rejects binary utf8 and streaming client serializes pdf and text attachments`() {
+    val validText = "fun hello() = \"Ved\"".toByteArray(Charsets.UTF_8)
+    assertEquals("fun hello() = \"Ved\"", AttachmentProcessor.decodeStrictUtf8OrNull(validText))
+
+    val binaryWithNul = byteArrayOf(0x50, 0x4B, 0x00, 0x04)
+    assertNull(AttachmentProcessor.decodeStrictUtf8OrNull(binaryWithNul))
+
+    val client = StreamingAiClient(OkHttpClient())
+    val msg =
+      MessageEntity(
+        id = "msg-att",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_USER,
+        content = "Review these files",
+        createdAt = 1L,
+      )
+    val attachments =
+      mapOf(
+        msg.id to
+          listOf(
+            MessageAttachmentEntity(
+              id = "a1",
+              messageId = msg.id,
+              type = AttachmentTypes.TEXT,
+              displayName = "Main.kt",
+              mimeType = "text/plain",
+              localPath = "/tmp/Main.kt",
+              sizeBytes = 20L,
+            ),
+            MessageAttachmentEntity(
+              id = "a2",
+              messageId = msg.id,
+              type = AttachmentTypes.PDF,
+              displayName = "spec.pdf",
+              mimeType = "application/pdf",
+              localPath = "/tmp/spec.pdf",
+              sizeBytes = 128L,
+            ),
+          )
+      )
+
+    val req =
+      client.buildGeminiRequest(
+        modelId = "gemini-flash-latest",
+        apiKey = "test-key",
+        history = listOf(msg),
+        stream = true,
+        attachmentsByMessageId = attachments,
+        binaryBase64ByPath = mapOf("/tmp/spec.pdf" to "JVBERi0xLjQ="),
+        textContentByPath = mapOf("/tmp/Main.kt" to "val x = 42"),
+      )
+    val json = JSONObject(Buffer().also { req.body!!.writeTo(it) }.readUtf8())
+    val parts = json.getJSONArray("contents").getJSONObject(0).getJSONArray("parts")
+    assertEquals(2, parts.length())
+    val textPart = parts.getJSONObject(0).getString("text")
+    assertTrue(textPart.contains("[Attached file: Main.kt]"))
+    assertTrue(textPart.contains("val x = 42"))
+    val inlinePdf = parts.getJSONObject(1).getJSONObject("inlineData")
+    assertEquals("application/pdf", inlinePdf.getString("mimeType"))
+    assertEquals("JVBERi0xLjQ=", inlinePdf.getString("data"))
+  }
+
+  @Test
+  fun `skill matcher parses YAML frontmatter matches keywords and appends skills after memory`() {
+    val rawMd =
+      """
+      ---
+      name: Kotlin SQLite Tuner
+      description: Use when optimizing SQLite queries, Room indices, or database migrations
+      ---
+
+      Always add indexes on foreign keys and filter columns.
+      """.trimIndent()
+
+    val parsed = SkillMatcher.parseSkillMarkdown(rawMd, fallbackFileName = "sqlite.md")
+    assertTrue(parsed.hasValidFrontmatter)
+    assertEquals("Kotlin SQLite Tuner", parsed.name)
+    assertTrue(parsed.description.contains("SQLite queries"))
+    assertTrue(parsed.skillMarkdown.contains("Always add indexes"))
+
+    val skill =
+      SkillEntity(
+        id = "sk1",
+        name = parsed.name,
+        description = parsed.description,
+        skillMarkdown = parsed.skillMarkdown,
+        isEnabled = true,
+        source = SkillEntity.SOURCE_IMPORTED,
+        createdAt = 1L,
+        updatedAt = 1L,
+      )
+    val otherSkill =
+      SkillEntity(
+        id = "sk2",
+        name = "Watercolor Painting",
+        description = "Use when painting watercolor landscapes or mixing pigments",
+        skillMarkdown = "Use cold-press cotton paper.",
+        isEnabled = true,
+        source = SkillEntity.SOURCE_USER,
+        createdAt = 1L,
+        updatedAt = 1L,
+      )
+
+    val exported = SkillMatcher.formatSkillForExport(skill)
+    val reParsed = SkillMatcher.parseSkillMarkdown(exported)
+    assertEquals(skill.name, reParsed.name)
+    assertEquals(skill.description, reParsed.description)
+
+    val matched =
+      SkillMatcher.findBestMatchingSkill(
+        userPrompt = "Help me speed up Room database queries and add indices",
+        enabledSkills = listOf(otherSkill, skill),
+      )
+    assertEquals("sk1", matched?.id)
+
+    val indexBlock = SkillMatcher.formatSkillsIndexBlock(listOf(skill, otherSkill))
+    val activeBlock =
+      SkillMatcher.formatActiveSkillBlock(
+        SkillWithFiles(
+          skill = skill,
+          files = listOf(SkillFileEntity("f1", "sk1", "checklist.md", "- EXPLAIN QUERY PLAN")),
+        )
+      )
+
+    val combined =
+      MemoryPromptHelper.buildCombinedSystemInstruction(
+        customSystemPrompt = "Be concise.",
+        memoryContextBlock = "## What you remember about this user (long-term memory):\n- [profile] Android dev",
+        leadingInstruction = "Follow these standards:",
+        skillsIndexBlock = indexBlock,
+        activeSkillBlock = activeBlock,
+      )
+    val accIdx = combined.indexOf("Follow these standards:")
+    val memIdx = combined.indexOf("What you remember about this user")
+    val idxIdx = combined.indexOf("## Available skills")
+    val actIdx = combined.indexOf("## Active skill: Kotlin SQLite Tuner")
+    val refIdx = combined.indexOf("### Reference: checklist.md")
+    assertTrue(accIdx < memIdx && memIdx < idxIdx && idxIdx < actIdx && actIdx < refIdx)
+  }
+
+  @Test
+  fun `chat message item displays file attachment chips and skill pill`() {
+    val userMsg =
+      MessageEntity(
+        id = "u-att",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_USER,
+        content = "Summarize this",
+        createdAt = 1L,
+      )
+    val userAttachments =
+      listOf(
+        MessageAttachmentEntity(
+          id = "att-pdf",
+          messageId = "u-att",
+          type = AttachmentTypes.PDF,
+          displayName = "architecture.pdf",
+          mimeType = "application/pdf",
+          localPath = "/tmp/architecture.pdf",
+          sizeBytes = 512L,
+        )
+      )
+    val assistantMsg =
+      MessageEntity(
+        id = "a-skill",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_ASSISTANT,
+        content = "Summary ready.",
+        modelId = "gemini-flash-latest",
+        createdAt = 2L,
+        activeSkillName = "Kotlin SQLite Tuner",
+      )
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        LazyColumn {
+          item {
+            ChatMessageItem(
+              message = userMsg,
+              attachments = userAttachments,
+              displayContent = userMsg.content,
+              isStreaming = false,
+              isLastAssistantMessage = false,
+              onRegenerate = {},
+            )
+          }
+          item {
+            ChatMessageItem(
+              message = assistantMsg,
+              displayContent = assistantMsg.content,
+              isStreaming = false,
+              isLastAssistantMessage = true,
+              onRegenerate = {},
+            )
+          }
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("user_message_file_chip", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithText("architecture.pdf", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithTag("message_skill_pill").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Skill: Kotlin SQLite Tuner").assertIsDisplayed()
+  }
+
+  @Test
+  fun `ved notifications registers channels and builds ongoing notification`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    VedNotifications.ensureChannels(context)
+    val manager = context.getSystemService(android.app.NotificationManager::class.java)
+    assertTrue(manager.getNotificationChannel(VedNotifications.CHANNEL_ONGOING) != null)
+    assertTrue(manager.getNotificationChannel(VedNotifications.CHANNEL_COMPLETION) != null)
   }
 }

@@ -42,31 +42,20 @@ data class AiModelInfo(
 )
 
 /**
- * Built-in curated Gemini models available via Google AI Studio API.
+ * Last-resort fallback Gemini models used ONLY if the live `/v1beta/models` endpoint is
+ * unreachable or no Gemini API key is configured yet. Not a primary model source.
  */
-val DefaultGeminiModels: List<AiModelInfo> =
+val FallbackGeminiModels: List<AiModelInfo> =
   listOf(
     AiModelInfo(
-      id = "gemini-2.5-flash",
-      name = "Gemini 2.5 Flash",
+      id = "gemini-flash-latest",
+      name = "Gemini Flash (Latest)",
       provider = AiProvider.GEMINI,
       contextLength = 1_048_576,
     ),
     AiModelInfo(
-      id = "gemini-2.5-pro",
-      name = "Gemini 2.5 Pro",
-      provider = AiProvider.GEMINI,
-      contextLength = 1_048_576,
-    ),
-    AiModelInfo(
-      id = "gemini-2.5-flash-lite",
-      name = "Gemini 2.5 Flash-Lite",
-      provider = AiProvider.GEMINI,
-      contextLength = 1_048_576,
-    ),
-    AiModelInfo(
-      id = "gemini-2.0-flash",
-      name = "Gemini 2.0 Flash",
+      id = "gemini-pro-latest",
+      name = "Gemini Pro (Latest)",
       provider = AiProvider.GEMINI,
       contextLength = 1_048_576,
     ),

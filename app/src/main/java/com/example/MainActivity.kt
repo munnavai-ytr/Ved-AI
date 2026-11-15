@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -12,19 +13,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.service.VedNotifications
 import com.example.ui.navigation.VedNavHost
 import com.example.ui.theme.VedTheme
 import com.example.ui.viewmodel.AppBootstrapState
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.VedViewModelFactory
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
- * Single-activity entry point hosting edge-to-edge Compose UI for Ved.
+ * Single-activity entry point hosting edge-to-edge Compose UI for Ved and handling completion
+ * notification deep links via [VedNotifications.EXTRA_CONVERSATION_ID].
  */
 class MainActivity : ComponentActivity() {
+
+  private val deepLinkConversationId = MutableStateFlow<String?>(null)
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
+    extractConversationExtra(intent)
 
     val appContainer = (application as VedApplication).container
     val factory = VedViewModelFactory(appContainer)
@@ -32,6 +40,7 @@ class MainActivity : ComponentActivity() {
     setContent {
       val mainViewModel: MainViewModel = viewModel(factory = factory)
       val bootstrapState by mainViewModel.bootstrapState.collectAsStateWithLifecycle()
+      val pendingConversationId by deepLinkConversationId.collectAsStateWithLifecycle()
 
       when (val state = bootstrapState) {
         AppBootstrapState.Loading -> {
@@ -47,10 +56,25 @@ class MainActivity : ComponentActivity() {
               startWithOnboarding = !state.onboardingCompleted,
               factory = factory,
               onCompleteOnboarding = mainViewModel::completeOnboarding,
+              deepLinkConversationId = pendingConversationId,
+              onConsumeDeepLink = { deepLinkConversationId.value = null },
             )
           }
         }
       }
+    }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    extractConversationExtra(intent)
+  }
+
+  private fun extractConversationExtra(intent: Intent?) {
+    val convId = intent?.getStringExtra(VedNotifications.EXTRA_CONVERSATION_ID)
+    if (!convId.isNullOrBlank()) {
+      deepLinkConversationId.value = convId
     }
   }
 }

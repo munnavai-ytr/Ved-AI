@@ -1,6 +1,7 @@
 package com.example.data.model
 
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
 import kotlinx.serialization.Serializable
 
@@ -13,6 +14,7 @@ data class ChatBackup(
   val exportedAt: Long = System.currentTimeMillis(),
   val conversations: List<ConversationEntity>,
   val messages: List<MessageEntity>,
+  val attachments: List<MessageAttachmentEntity> = emptyList(),
 ) {
   companion object {
     const val CURRENT_VERSION = 1

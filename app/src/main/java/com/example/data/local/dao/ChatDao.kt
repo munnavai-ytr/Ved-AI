@@ -6,11 +6,13 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import com.example.data.local.entity.ConversationEntity
+import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
+import com.example.data.local.entity.MessageWithAttachments
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Data Access Object for conversations and messages.
+ * Data Access Object for conversations, messages, and file attachments.
  */
 @Dao
 interface ChatDao {
@@ -32,17 +34,28 @@ interface ChatDao {
   @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
   fun observeMessages(conversationId: String): Flow<List<MessageEntity>>
 
+  @Transaction
+  @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
+  fun observeMessagesWithAttachments(conversationId: String): Flow<List<MessageWithAttachments>>
+
   @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
   suspend fun getConversation(conversationId: String): ConversationEntity?
 
   @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
   suspend fun getMessagesSync(conversationId: String): List<MessageEntity>
 
+  @Transaction
+  @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
+  suspend fun getMessagesWithAttachmentsSync(conversationId: String): List<MessageWithAttachments>
+
   @Query("SELECT * FROM conversations ORDER BY updatedAt DESC")
   suspend fun getAllConversationsSync(): List<ConversationEntity>
 
   @Query("SELECT * FROM messages ORDER BY createdAt ASC")
   suspend fun getAllMessagesSync(): List<MessageEntity>
+
+  @Query("SELECT * FROM message_attachments")
+  suspend fun getAllAttachmentsSync(): List<MessageAttachmentEntity>
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertConversation(conversation: ConversationEntity)
@@ -75,13 +88,28 @@ interface ChatDao {
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertMessages(messages: List<MessageEntity>)
 
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insertAttachments(attachments: List<MessageAttachmentEntity>)
+
+  @Transaction
+  suspend fun insertMessageWithAttachments(
+    message: MessageEntity,
+    attachments: List<MessageAttachmentEntity>,
+  ) {
+    insertMessage(message)
+    if (attachments.isNotEmpty()) {
+      insertAttachments(attachments)
+    }
+  }
+
   @Query(
     """
     UPDATE messages
     SET content = :content,
         isError = :isError,
         promptTokens = :promptTokens,
-        completionTokens = :completionTokens
+        completionTokens = :completionTokens,
+        activeSkillName = COALESCE(:activeSkillName, activeSkillName)
     WHERE id = :messageId
     """
   )
@@ -91,6 +119,7 @@ interface ChatDao {
     isError: Boolean,
     promptTokens: Int?,
     completionTokens: Int?,
+    activeSkillName: String? = null,
   )
 
   @Query("DELETE FROM messages WHERE id = :messageId")
@@ -105,10 +134,14 @@ interface ChatDao {
   suspend fun restoreConversation(
     conversation: ConversationEntity,
     messages: List<MessageEntity>,
+    attachments: List<MessageAttachmentEntity> = emptyList(),
   ) {
     insertConversation(conversation)
     if (messages.isNotEmpty()) {
       insertMessages(messages)
+    }
+    if (attachments.isNotEmpty()) {
+      insertAttachments(attachments)
     }
   }
 
@@ -116,12 +149,16 @@ interface ChatDao {
   suspend fun importBackup(
     conversations: List<ConversationEntity>,
     messages: List<MessageEntity>,
+    attachments: List<MessageAttachmentEntity> = emptyList(),
   ) {
     if (conversations.isNotEmpty()) {
       insertConversations(conversations)
     }
     if (messages.isNotEmpty()) {
       insertMessages(messages)
+    }
+    if (attachments.isNotEmpty()) {
+      insertAttachments(attachments)
     }
   }
 }

@@ -14,22 +14,29 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AddPhotoAlternate
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Stop
@@ -56,13 +63,18 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.entity.SkillEntity
+import com.example.data.util.AttachmentTypes
 import com.example.data.util.ImageProcessor
+import com.example.data.util.PendingAttachment
 
 /**
- * Fixed, elevated bottom composer bar with optional editing banner, image attachment preview,
- * Photo Picker trigger, and Send <-> Stop morphing action button.
+ * Fixed, elevated bottom composer bar with optional editing banner, multi-file attachment
+ * preview strip (images, PDFs, text/code), optional pinned skill chip, file picker trigger,
+ * and Send <-> Stop morphing action button.
  */
 @Composable
 fun ChatInputBar(
@@ -73,14 +85,17 @@ fun ChatInputBar(
   onStop: () -> Unit,
   isEditing: Boolean = false,
   onCancelEdit: () -> Unit = {},
-  pendingImageUri: String? = null,
+  pendingAttachments: List<PendingAttachment> = emptyList(),
   isGeminiActive: Boolean = true,
-  onAttachImageClick: () -> Unit = {},
-  onRemoveImage: () -> Unit = {},
+  onAttachFilesClick: () -> Unit = {},
+  onRemoveAttachment: (String) -> Unit = {},
+  hasEnabledSkills: Boolean = false,
+  pinnedSkill: SkillEntity? = null,
+  onOpenSkillPicker: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val haptic = LocalHapticFeedback.current
-  val canSend = text.isNotBlank() || pendingImageUri != null
+  val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
 
   Box(
     modifier =
@@ -140,15 +155,55 @@ fun ChatInputBar(
           }
         }
 
-        AnimatedVisibility(visible = !pendingImageUri.isNullOrBlank()) {
-          if (!pendingImageUri.isNullOrBlank()) {
-            PendingImagePreview(
-              uriString = pendingImageUri,
-              onRemove = {
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                onRemoveImage()
-              },
-            )
+        AnimatedVisibility(visible = pendingAttachments.isNotEmpty()) {
+          LazyRow(
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth().testTag("pending_attachments_row"),
+          ) {
+            items(items = pendingAttachments, key = { it.id }) { attachment ->
+              PendingAttachmentChip(
+                attachment = attachment,
+                onRemove = {
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  onRemoveAttachment(attachment.id)
+                },
+              )
+            }
+          }
+        }
+
+        if (pinnedSkill != null) {
+          Row(
+            modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Surface(
+              onClick = onOpenSkillPicker,
+              shape = RoundedCornerShape(10.dp),
+              color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+              modifier = Modifier.heightIn(min = 32.dp).testTag("pinned_skill_chip"),
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+              ) {
+                Icon(
+                  imageVector = Icons.Outlined.AutoAwesome,
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.primary,
+                  modifier = Modifier.size(14.dp),
+                )
+                Text(
+                  text = stringResource(R.string.chat_skill_pill, pinnedSkill.name),
+                  style = MaterialTheme.typography.labelMedium,
+                  color = MaterialTheme.colorScheme.onSurface,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
           }
         }
 
@@ -159,19 +214,37 @@ fun ChatInputBar(
           IconButton(
             onClick = {
               haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-              onAttachImageClick()
+              onAttachFilesClick()
             },
             enabled = !isGenerating,
-            modifier = Modifier.size(48.dp).testTag("attach_image_button"),
+            modifier = Modifier.size(48.dp).testTag("attach_files_button"),
           ) {
             Icon(
-              imageVector = Icons.Outlined.AddPhotoAlternate,
-              contentDescription = stringResource(R.string.cd_attach_image),
+              imageVector = Icons.Outlined.AttachFile,
+              contentDescription = stringResource(R.string.cd_attach_files),
               tint =
                 if (isGeminiActive && !isGenerating) MaterialTheme.colorScheme.onSurfaceVariant
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
               modifier = Modifier.size(22.dp),
             )
+          }
+
+          if (hasEnabledSkills && pinnedSkill == null) {
+            IconButton(
+              onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onOpenSkillPicker()
+              },
+              enabled = !isGenerating,
+              modifier = Modifier.size(48.dp).testTag("select_skill_button"),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.AutoAwesome,
+                contentDescription = stringResource(R.string.cd_select_skill),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+              )
+            }
           }
 
           Box(
@@ -252,50 +325,105 @@ fun ChatInputBar(
 }
 
 @Composable
-private fun PendingImagePreview(
-  uriString: String,
+private fun PendingAttachmentChip(
+  attachment: PendingAttachment,
   onRemove: () -> Unit,
 ) {
-  val context = LocalContext.current
-  val bitmap by
-    produceState<Bitmap?>(initialValue = null, key1 = uriString) {
-      value = ImageProcessor.loadThumbnailBitmap(context, uriString, maxPx = 256)
-    }
+  if (attachment.type == AttachmentTypes.IMAGE) {
+    val context = LocalContext.current
+    val bitmap by
+      produceState<Bitmap?>(initialValue = null, key1 = attachment.localPath) {
+        value = ImageProcessor.loadThumbnailBitmap(context, attachment.localPath, maxPx = 256)
+      }
 
-  Row(
-    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 10.dp),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    val loaded = bitmap
-    if (loaded != null) {
-      Image(
-        bitmap = loaded.asImageBitmap(),
-        contentDescription = stringResource(R.string.cd_attached_image),
-        contentScale = ContentScale.Crop,
-        modifier =
-          Modifier.size(64.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .testTag("pending_image_preview"),
-      )
-    } else {
-      Box(
-        modifier =
-          Modifier.size(64.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-      )
-    }
+    Box(modifier = Modifier.size(64.dp)) {
+      val loaded = bitmap
+      if (loaded != null) {
+        Image(
+          bitmap = loaded.asImageBitmap(),
+          contentDescription = attachment.displayName,
+          contentScale = ContentScale.Crop,
+          modifier =
+            Modifier.size(64.dp)
+              .clip(RoundedCornerShape(12.dp))
+              .testTag("pending_image_preview"),
+        )
+      } else {
+        Box(
+          modifier =
+            Modifier.size(64.dp)
+              .clip(RoundedCornerShape(12.dp))
+              .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+        )
+      }
 
-    IconButton(
-      onClick = onRemove,
-      modifier = Modifier.size(48.dp).testTag("remove_attached_image_button"),
+      Surface(
+        onClick = onRemove,
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+        shadowElevation = 2.dp,
+        modifier =
+          Modifier.align(Alignment.TopEnd)
+            .padding(3.dp)
+            .size(22.dp)
+            .testTag("remove_attachment_${attachment.id}"),
+      ) {
+        Box(contentAlignment = Alignment.Center) {
+          Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = stringResource(R.string.cd_remove_attachment, attachment.displayName),
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(14.dp),
+          )
+        }
+      }
+    }
+  } else {
+    val isPdf = attachment.type == AttachmentTypes.PDF
+    Surface(
+      shape = RoundedCornerShape(12.dp),
+      color = MaterialTheme.colorScheme.surfaceContainerHigh,
+      modifier = Modifier.heightIn(min = 48.dp).testTag("pending_file_chip"),
     ) {
-      Icon(
-        imageVector = Icons.Rounded.Close,
-        contentDescription = stringResource(R.string.cd_remove_image),
-        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
+      Row(
+        modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        Icon(
+          imageVector = if (isPdf) Icons.Outlined.PictureAsPdf else Icons.Outlined.Description,
+          contentDescription = null,
+          tint = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.size(18.dp),
+        )
+        Column(modifier = Modifier.widthIn(max = 140.dp)) {
+          Text(
+            text = attachment.displayName,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          if (isPdf) {
+            Text(
+              text = stringResource(R.string.chat_attachment_pdf_badge),
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+        IconButton(
+          onClick = onRemove,
+          modifier = Modifier.size(36.dp).testTag("remove_attachment_${attachment.id}"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Close,
+            contentDescription = stringResource(R.string.cd_remove_attachment, attachment.displayName),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+          )
+        }
+      }
     }
   }
 }
