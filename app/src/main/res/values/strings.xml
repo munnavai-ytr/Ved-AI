@@ -22,7 +22,7 @@
     <string name="cd_attach_image">Attach files</string>
     <string name="cd_remove_image">Remove attachment</string>
     <string name="cd_attached_image">Attached image</string>
-    <string name="cd_attach_files">Attach images, PDFs, or text files</string>
+    <string name="cd_attach_files">Attach camera, photos, or files</string>
     <string name="cd_remove_attachment">Remove %1$s</string>
     <string name="cd_select_skill">Select skill</string>
 
@@ -53,7 +53,15 @@
     <string name="chat_editing_banner">Editing message</string>
     <string name="chat_image_openrouter_unsupported">File attachments are only supported with Gemini</string>
     <string name="chat_image_attach_failed">Could not load selected file</string>
+    <string name="chat_attach_camera">Camera</string>
+    <string name="chat_attach_photos">Photos</string>
+    <string name="chat_attach_files">Files</string>
+    <string name="chat_camera_permission_denied">Camera permission is needed to take a photo. You can enable it in system settings.</string>
+    <string name="chat_thinking">Thinking</string>
     <string name="chat_attachment_pdf_badge">PDF</string>
+    <string name="chat_attachment_audio_badge">AUDIO</string>
+    <string name="chat_attachment_video_badge">VIDEO</string>
+    <string name="model_fast_badge">Fast</string>
     <string name="chat_skill_pill">Skill: %1$s</string>
     <string name="chat_skill_auto">Auto skill</string>
     <string name="chat_skill_picker_title">Pin a skill</string>

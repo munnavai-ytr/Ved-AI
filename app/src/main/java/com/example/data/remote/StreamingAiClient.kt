@@ -283,10 +283,22 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
 
       if (msgAttachments.isNotEmpty()) {
         for (att in msgAttachments) {
-          if (att.type == AttachmentTypes.IMAGE || att.type == AttachmentTypes.PDF) {
+          if (
+            att.type == AttachmentTypes.IMAGE ||
+              att.type == AttachmentTypes.PDF ||
+              att.type == AttachmentTypes.AUDIO ||
+              att.type == AttachmentTypes.VIDEO
+          ) {
             val base64 = binaryBase64ByPath[att.localPath]
             if (!base64.isNullOrBlank()) {
-              val mime = if (att.type == AttachmentTypes.PDF) "application/pdf" else "image/jpeg"
+              val mime =
+                att.mimeType.takeIf { it.isNotBlank() }
+                  ?: when (att.type) {
+                    AttachmentTypes.PDF -> "application/pdf"
+                    AttachmentTypes.AUDIO -> "audio/mpeg"
+                    AttachmentTypes.VIDEO -> "video/mp4"
+                    else -> "image/jpeg"
+                  }
               partsArray.put(
                 JSONObject()
                   .put("inlineData", JSONObject().put("mimeType", mime).put("data", base64))

@@ -1,12 +1,19 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -133,6 +140,9 @@ fun ChatScreen(
   var askedNotificationPermission by remember { mutableStateOf(false) }
   var pendingSendAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
+  var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+  var cameraPermissionDeniedInSession by remember { mutableStateOf(false) }
+
   val notificationPermissionLauncher =
     rememberLauncherForActivityResult(
       contract = ActivityResultContracts.RequestPermission()
@@ -141,21 +151,64 @@ fun ChatScreen(
       pendingSendAction = null
     }
 
+  val takePictureLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+      val capturedUri = pendingCameraUri
+      pendingCameraUri = null
+      if (success && capturedUri != null) {
+        persistReadPermissions(context, listOf(capturedUri))
+        viewModel.attachFiles(listOf(capturedUri))
+      }
+    }
+
+  val launchCameraCapture: () -> Unit =
+    remember(context, takePictureLauncher) {
+      {
+        val uri = createTempCameraImageUri(context)
+        if (uri != null) {
+          pendingCameraUri = uri
+          takePictureLauncher.launch(uri)
+        } else {
+          scope.launch {
+            snackbarHostState.showSnackbar(context.getString(R.string.chat_image_attach_failed))
+          }
+        }
+        Unit
+      }
+    }
+
+  val cameraPermissionDeniedMessage = stringResource(R.string.chat_camera_permission_denied)
+  val cameraPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+      if (granted) {
+        cameraPermissionDeniedInSession = false
+        launchCameraCapture()
+      } else {
+        cameraPermissionDeniedInSession = true
+        scope.launch { snackbarHostState.showSnackbar(cameraPermissionDeniedMessage) }
+      }
+    }
+
+  val photoPickerLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+      if (uris.isNotEmpty()) {
+        persistReadPermissions(context, uris)
+        viewModel.attachFiles(uris)
+      }
+    }
+
   val documentPickerLauncher =
     rememberLauncherForActivityResult(
       contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
       if (uris.isNotEmpty()) {
-        for (uri in uris) {
-          try {
-            context.contentResolver.takePersistableUriPermission(
-              uri,
-              Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-          } catch (_: SecurityException) {
-            // Transient URI grant still valid long enough for AttachmentProcessor IO copy
-          }
-        }
+        persistReadPermissions(context, uris)
         viewModel.attachFiles(uris)
       }
     }
@@ -292,18 +345,66 @@ fun ChatScreen(
   val onCancelEdit = remember(viewModel) { { viewModel.cancelEditing() } }
   val onRemoveAttachment =
     remember(viewModel) { { id: String -> viewModel.removePendingAttachment(id) } }
-  val onAttachFilesClick =
-    remember(isGeminiActive, documentPickerLauncher, viewModel) {
+  val onAttachCameraClick: () -> Unit =
+    remember(
+      isGeminiActive,
+      context,
+      cameraPermissionDeniedInSession,
+      cameraPermissionLauncher,
+      launchCameraCapture,
+      cameraPermissionDeniedMessage,
+      viewModel,
+    ) {
+      {
+        if (!isGeminiActive) {
+          viewModel.notifyAttachmentsUnsupportedForOpenRouter()
+        } else if (
+          ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+          launchCameraCapture()
+        } else if (cameraPermissionDeniedInSession) {
+          scope.launch { snackbarHostState.showSnackbar(cameraPermissionDeniedMessage) }
+        } else {
+          cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+        Unit
+      }
+    }
+  val onAttachPhotosClick =
+    remember(isGeminiActive, photoPickerLauncher, viewModel) {
       {
         if (isGeminiActive) {
-          documentPickerLauncher.launch(
-            arrayOf("image/*", "application/pdf", "text/*", "application/json", "*/*")
+          photoPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
           )
         } else {
           viewModel.notifyAttachmentsUnsupportedForOpenRouter()
         }
       }
     }
+  val onAttachFilesClick =
+    remember(isGeminiActive, documentPickerLauncher, viewModel) {
+      {
+        if (isGeminiActive) {
+          documentPickerLauncher.launch(
+            arrayOf(
+              "image/*",
+              "application/pdf",
+              "text/*",
+              "application/json",
+              "audio/*",
+              "video/*",
+              "*/*",
+            )
+          )
+        } else {
+          viewModel.notifyAttachmentsUnsupportedForOpenRouter()
+        }
+      }
+    }
+  val onAttachUnsupportedClick =
+    remember(viewModel) { { viewModel.notifyAttachmentsUnsupportedForOpenRouter() } }
   val onSelectConversation =
     remember(viewModel, scope, drawerState) {
       { id: String ->
@@ -534,7 +635,10 @@ fun ChatScreen(
           onCancelEdit = onCancelEdit,
           pendingAttachments = uiState.pendingAttachments,
           isGeminiActive = isGeminiActive,
+          onAttachCameraClick = onAttachCameraClick,
+          onAttachPhotosClick = onAttachPhotosClick,
           onAttachFilesClick = onAttachFilesClick,
+          onAttachUnsupportedClick = onAttachUnsupportedClick,
           onRemoveAttachment = onRemoveAttachment,
           hasEnabledSkills = uiState.enabledSkills.isNotEmpty(),
           pinnedSkill = uiState.pinnedSkill,
@@ -778,3 +882,24 @@ private fun ChatEmptyState(
     }
   }
 }
+
+private fun persistReadPermissions(context: Context, uris: List<Uri>) {
+  val resolver = context.contentResolver
+  for (uri in uris) {
+    try {
+      resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    } catch (_: Throwable) {
+      // Transient URI grant still valid long enough for AttachmentProcessor IO copy
+    }
+  }
+}
+
+private fun createTempCameraImageUri(context: Context): Uri? {
+  return runCatching {
+      val dir = File(context.cacheDir, "camera_photos").apply { mkdirs() }
+      val file = File(dir, "ved_camera_${System.currentTimeMillis()}.jpg")
+      FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    }
+    .getOrNull()
+}
+

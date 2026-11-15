@@ -23,6 +23,8 @@ import kotlinx.coroutines.withContext
 object AttachmentTypes {
   const val IMAGE = "image"
   const val PDF = "pdf"
+  const val AUDIO = "audio"
+  const val VIDEO = "video"
   const val TEXT = "text"
 }
 
@@ -59,7 +61,8 @@ sealed interface AttachmentPrepareResult {
 
 /**
  * Handles reading, validating, compressing/copying, and encoding multi-file attachments
- * (images, PDFs, and UTF-8 plain-text/code files) into app-private storage off the main thread.
+ * (images, PDFs, audio, video, and UTF-8 plain-text/code files) into app-private storage off
+ * the main thread.
  */
 object AttachmentProcessor {
 
@@ -71,10 +74,13 @@ object AttachmentProcessor {
    */
   const val MAX_REQUEST_BASE64_BYTES = 15L * 1024L * 1024L
   const val MAX_COMBINED_BINARY_BYTES = (MAX_REQUEST_BASE64_BYTES * 3L) / 4L
+  const val MAX_SINGLE_VIDEO_BYTES = 10L * 1024L * 1024L
   const val MAX_TEXT_CHARS = 100_000
   private const val MAX_RAW_TEXT_READ_BYTES = 512L * 1024L
 
   private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "heic", "heif", "gif", "bmp")
+  private val AUDIO_EXTENSIONS = setOf("mp3", "wav", "m4a", "aac", "ogg", "flac", "opus")
+  private val VIDEO_EXTENSIONS = setOf("mp4", "mov", "webm", "mkv", "3gp", "avi")
   private val TEXT_EXTENSIONS =
     setOf(
       "txt",
@@ -137,7 +143,7 @@ object AttachmentProcessor {
       val ext = displayName.substringAfterLast('.', "").lowercase()
       val currentBinaryBytes =
         existingAttachments
-          .filter { it.type == AttachmentTypes.IMAGE || it.type == AttachmentTypes.PDF }
+          .filter { it.type != AttachmentTypes.TEXT }
           .sumOf { it.sizeBytes }
 
       when {
@@ -145,6 +151,26 @@ object AttachmentProcessor {
           prepareImageAttachment(appContext, sourceUri, displayName, currentBinaryBytes)
         isPdfFile(reportedMime, ext) ->
           preparePdfAttachment(appContext, resolver, sourceUri, displayName, currentBinaryBytes)
+        isAudioFile(reportedMime, ext) ->
+          prepareAudioAttachment(
+            appContext = appContext,
+            resolver = resolver,
+            sourceUri = sourceUri,
+            displayName = displayName,
+            reportedMime = reportedMime,
+            ext = ext,
+            currentBinaryBytes = currentBinaryBytes,
+          )
+        isVideoFile(reportedMime, ext) ->
+          prepareVideoAttachment(
+            appContext = appContext,
+            resolver = resolver,
+            sourceUri = sourceUri,
+            displayName = displayName,
+            reportedMime = reportedMime,
+            ext = ext,
+            currentBinaryBytes = currentBinaryBytes,
+          )
         isKnownTextFile(reportedMime, ext) ->
           prepareTextAttachment(
             appContext = appContext,
@@ -299,6 +325,172 @@ object AttachmentProcessor {
       AttachmentPrepareResult.Failure(
         AttachmentFailureReason.IO_ERROR,
         "Could not read PDF \"$displayName\": ${t.message ?: "I/O error"}",
+      )
+    }
+  }
+
+  private fun prepareAudioAttachment(
+    appContext: Context,
+    resolver: ContentResolver,
+    sourceUri: Uri,
+    displayName: String,
+    reportedMime: String?,
+    ext: String,
+    currentBinaryBytes: Long,
+  ): AttachmentPrepareResult {
+    val resolvedMime =
+      reportedMime
+        ?.takeIf { it.startsWith("audio/", ignoreCase = true) && it != "audio/*" }
+        ?.lowercase()
+        ?: inferAudioMime(ext)
+    val fileExt = ext.takeIf { it in AUDIO_EXTENSIONS } ?: "mp3"
+    return prepareBinaryStreamAttachment(
+      appContext = appContext,
+      resolver = resolver,
+      sourceUri = sourceUri,
+      displayName = displayName.ifBlank { "audio.$fileExt" },
+      attachmentType = AttachmentTypes.AUDIO,
+      resolvedMime = resolvedMime,
+      fileExtension = fileExt,
+      typeLabel = "audio file",
+      currentBinaryBytes = currentBinaryBytes,
+      maxSingleFileBytes = null,
+      singleFileLimitMessage = null,
+    )
+  }
+
+  private fun prepareVideoAttachment(
+    appContext: Context,
+    resolver: ContentResolver,
+    sourceUri: Uri,
+    displayName: String,
+    reportedMime: String?,
+    ext: String,
+    currentBinaryBytes: Long,
+  ): AttachmentPrepareResult {
+    val resolvedMime =
+      reportedMime
+        ?.takeIf { it.startsWith("video/", ignoreCase = true) && it != "video/*" }
+        ?.lowercase()
+        ?: inferVideoMime(ext)
+    val fileExt = ext.takeIf { it in VIDEO_EXTENSIONS } ?: "mp4"
+    return prepareBinaryStreamAttachment(
+      appContext = appContext,
+      resolver = resolver,
+      sourceUri = sourceUri,
+      displayName = displayName.ifBlank { "video.$fileExt" },
+      attachmentType = AttachmentTypes.VIDEO,
+      resolvedMime = resolvedMime,
+      fileExtension = fileExt,
+      typeLabel = "video file",
+      currentBinaryBytes = currentBinaryBytes,
+      maxSingleFileBytes = MAX_SINGLE_VIDEO_BYTES,
+      singleFileLimitMessage =
+        "This video is too large to attach (max ~10 MB). Try a shorter clip.",
+    )
+  }
+
+  private fun prepareBinaryStreamAttachment(
+    appContext: Context,
+    resolver: ContentResolver,
+    sourceUri: Uri,
+    displayName: String,
+    attachmentType: String,
+    resolvedMime: String,
+    fileExtension: String,
+    typeLabel: String,
+    currentBinaryBytes: Long,
+    maxSingleFileBytes: Long?,
+    singleFileLimitMessage: String?,
+  ): AttachmentPrepareResult {
+    val dir = File(appContext.filesDir, ATTACHMENTS_DIR).apply { mkdirs() }
+    val id = UUID.randomUUID().toString()
+    val outFile = File(dir, "$id.$fileExtension")
+
+    return try {
+      val reportedSize = queryFileSize(resolver, sourceUri)
+      if (reportedSize != null) {
+        if (maxSingleFileBytes != null && reportedSize > maxSingleFileBytes) {
+          return AttachmentPrepareResult.Failure(
+            AttachmentFailureReason.PAYLOAD_BUDGET_EXCEEDED,
+            singleFileLimitMessage ?: "\"$displayName\" is too large to attach.",
+          )
+        }
+        if (currentBinaryBytes + reportedSize > MAX_COMBINED_BINARY_BYTES) {
+          return AttachmentPrepareResult.Failure(
+            AttachmentFailureReason.PAYLOAD_BUDGET_EXCEEDED,
+            "Adding \"$displayName\" would exceed the 15 MB request limit.",
+          )
+        }
+      }
+
+      val input = resolver.openInputStream(sourceUri)
+      if (input == null) {
+        Log.e(TAG, "openInputStream returned null for $typeLabel URI: $sourceUri")
+        return AttachmentPrepareResult.Failure(
+          AttachmentFailureReason.IO_ERROR,
+          "Could not open $typeLabel \"$displayName\".",
+        )
+      }
+
+      var totalCopied = 0L
+      input.use { src ->
+        FileOutputStream(outFile).use { dst ->
+          val buffer = ByteArray(16 * 1024)
+          while (true) {
+            val read = src.read(buffer)
+            if (read <= 0) break
+            totalCopied += read
+            if (maxSingleFileBytes != null && totalCopied > maxSingleFileBytes) {
+              outFile.delete()
+              return AttachmentPrepareResult.Failure(
+                AttachmentFailureReason.PAYLOAD_BUDGET_EXCEEDED,
+                singleFileLimitMessage ?: "\"$displayName\" is too large to attach.",
+              )
+            }
+            if (currentBinaryBytes + totalCopied > MAX_COMBINED_BINARY_BYTES) {
+              outFile.delete()
+              return AttachmentPrepareResult.Failure(
+                AttachmentFailureReason.PAYLOAD_BUDGET_EXCEEDED,
+                "Adding \"$displayName\" exceeds the 15 MB request limit.",
+              )
+            }
+            dst.write(buffer, 0, read)
+          }
+        }
+      }
+
+      if (totalCopied <= 0L) {
+        outFile.delete()
+        return AttachmentPrepareResult.Failure(
+          AttachmentFailureReason.DECODE_FAILED,
+          "Selected $typeLabel \"$displayName\" is empty.",
+        )
+      }
+
+      AttachmentPrepareResult.Success(
+        PendingAttachment(
+          id = id,
+          type = attachmentType,
+          displayName = displayName,
+          mimeType = resolvedMime,
+          localPath = outFile.absolutePath,
+          sizeBytes = totalCopied,
+        )
+      )
+    } catch (se: SecurityException) {
+      Log.e(TAG, "SecurityException reading $typeLabel URI: $sourceUri", se)
+      outFile.delete()
+      AttachmentPrepareResult.Failure(
+        AttachmentFailureReason.PERMISSION_DENIED,
+        "Permission denied reading \"$displayName\". Please select the file again.",
+      )
+    } catch (t: Throwable) {
+      Log.e(TAG, "Error preparing $typeLabel attachment $sourceUri", t)
+      outFile.delete()
+      AttachmentPrepareResult.Failure(
+        AttachmentFailureReason.IO_ERROR,
+        "Could not read $typeLabel \"$displayName\": ${t.message ?: "I/O error"}",
       )
     }
   }
@@ -510,11 +702,38 @@ object AttachmentProcessor {
       .getOrNull()
   }
 
-  private fun isImageFile(mimeType: String?, ext: String): Boolean =
+  internal fun isImageFile(mimeType: String?, ext: String): Boolean =
     mimeType?.startsWith("image/", ignoreCase = true) == true || ext in IMAGE_EXTENSIONS
 
-  private fun isPdfFile(mimeType: String?, ext: String): Boolean =
+  internal fun isPdfFile(mimeType: String?, ext: String): Boolean =
     mimeType.equals("application/pdf", ignoreCase = true) || ext == "pdf"
+
+  internal fun isAudioFile(mimeType: String?, ext: String): Boolean =
+    mimeType?.startsWith("audio/", ignoreCase = true) == true || ext in AUDIO_EXTENSIONS
+
+  internal fun isVideoFile(mimeType: String?, ext: String): Boolean =
+    mimeType?.startsWith("video/", ignoreCase = true) == true || ext in VIDEO_EXTENSIONS
+
+  private fun inferAudioMime(ext: String): String =
+    when (ext.lowercase()) {
+      "wav" -> "audio/wav"
+      "m4a" -> "audio/mp4"
+      "aac" -> "audio/aac"
+      "ogg" -> "audio/ogg"
+      "flac" -> "audio/flac"
+      "opus" -> "audio/opus"
+      else -> "audio/mpeg"
+    }
+
+  private fun inferVideoMime(ext: String): String =
+    when (ext.lowercase()) {
+      "mov" -> "video/quicktime"
+      "webm" -> "video/webm"
+      "mkv" -> "video/x-matroska"
+      "3gp" -> "video/3gpp"
+      "avi" -> "video/x-msvideo"
+      else -> "video/mp4"
+    }
 
   private fun isKnownTextFile(mimeType: String?, ext: String): Boolean =
     mimeType?.startsWith("text/", ignoreCase = true) == true ||

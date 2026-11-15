@@ -1,6 +1,10 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.SideEffect
@@ -9,12 +13,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.VedDatabase
 import com.example.data.local.entity.ConversationEntity
 import com.example.data.local.entity.MessageEntity
 import com.example.data.model.ThemeMode
+import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
 import com.example.ui.components.IncrementalMarkdownParser
 import com.example.ui.components.MarkdownBlock
@@ -33,6 +39,8 @@ import com.example.data.local.entity.MessageWithAttachments
 import com.example.data.local.entity.SkillEntity
 import com.example.data.local.entity.SkillFileEntity
 import com.example.data.local.entity.SkillWithFiles
+import com.example.data.model.AiModelInfo
+import com.example.data.model.AiProvider
 import com.example.data.model.ChatBackup
 import com.example.data.model.FallbackGeminiModels
 import com.example.data.preferences.UserPreferencesRepository
@@ -42,13 +50,18 @@ import com.example.data.remote.OpenRouterApiService
 import com.example.data.remote.StreamingAiClient
 import com.example.data.repository.ChatRepository
 import com.example.data.security.ApiKeyStore
+import com.example.data.util.AttachmentFailureReason
+import com.example.data.util.AttachmentPrepareResult
 import com.example.data.util.AttachmentProcessor
 import com.example.data.util.AttachmentTypes
 import com.example.data.util.MemoryPromptHelper
+import com.example.data.util.PendingAttachment
 import com.example.data.util.SkillMatcher
 import com.example.service.VedNotifications
 import com.example.ui.screens.MemoryScreen
 import com.example.ui.viewmodel.MemoryViewModel
+import java.io.File
+import java.io.RandomAccessFile
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okio.Buffer
@@ -1205,5 +1218,240 @@ class ExampleRobolectricTest {
     val manager = context.getSystemService(android.app.NotificationManager::class.java)
     assertTrue(manager.getNotificationChannel(VedNotifications.CHANNEL_ONGOING) != null)
     assertTrue(manager.getNotificationChannel(VedNotifications.CHANNEL_COMPLETION) != null)
+  }
+
+  @Test
+  fun `attachment processor handles audio and video enforces 10MB video cap and serializes gemini inlineData`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      assertTrue(AttachmentProcessor.isAudioFile("audio/mpeg", ""))
+      assertTrue(AttachmentProcessor.isAudioFile(null, "m4a"))
+      assertTrue(AttachmentProcessor.isVideoFile("video/mp4", ""))
+      assertTrue(AttachmentProcessor.isVideoFile(null, "mov"))
+
+      val tempDir = File(context.cacheDir, "media_test").apply { mkdirs() }
+      val audioFile = File(tempDir, "voice_note.mp3").apply { writeBytes(byteArrayOf(0x49, 0x44, 0x33, 0x03)) }
+      val videoFile = File(tempDir, "clip.mp4").apply { writeBytes(byteArrayOf(0x00, 0x00, 0x00, 0x18)) }
+      val hugeVideoFile = File(tempDir, "too_big.mp4")
+      RandomAccessFile(hugeVideoFile, "rw").use { it.setLength(AttachmentProcessor.MAX_SINGLE_VIDEO_BYTES + 1024L) }
+
+      try {
+        val audioResult = AttachmentProcessor.prepareAttachment(context, Uri.fromFile(audioFile))
+        assertTrue(audioResult is AttachmentPrepareResult.Success)
+        val audioPending = (audioResult as AttachmentPrepareResult.Success).attachment
+        assertEquals(AttachmentTypes.AUDIO, audioPending.type)
+        assertEquals("audio/mpeg", audioPending.mimeType)
+
+        val videoResult = AttachmentProcessor.prepareAttachment(context, Uri.fromFile(videoFile))
+        assertTrue(videoResult is AttachmentPrepareResult.Success)
+        val videoPending = (videoResult as AttachmentPrepareResult.Success).attachment
+        assertEquals(AttachmentTypes.VIDEO, videoPending.type)
+        assertEquals("video/mp4", videoPending.mimeType)
+
+        val hugeVideoResult =
+          AttachmentProcessor.prepareAttachment(context, Uri.fromFile(hugeVideoFile))
+        assertTrue(hugeVideoResult is AttachmentPrepareResult.Failure)
+        val failure = hugeVideoResult as AttachmentPrepareResult.Failure
+        assertEquals(AttachmentFailureReason.PAYLOAD_BUDGET_EXCEEDED, failure.reason)
+        assertTrue(failure.userMessage.contains("10 MB"))
+
+        val client = StreamingAiClient(OkHttpClient())
+        val msg =
+          MessageEntity(
+            id = "u-media",
+            conversationId = "c-media",
+            role = MessageEntity.ROLE_USER,
+            content = "Transcribe and summarize",
+            createdAt = 1L,
+          )
+        val req =
+          client.buildGeminiRequest(
+            modelId = "gemini-flash-latest",
+            apiKey = "test-key",
+            history = listOf(msg),
+            stream = true,
+            attachmentsByMessageId =
+              mapOf(
+                msg.id to
+                  listOf(
+                    MessageAttachmentEntity(
+                      id = audioPending.id,
+                      messageId = msg.id,
+                      type = audioPending.type,
+                      displayName = audioPending.displayName,
+                      mimeType = audioPending.mimeType,
+                      localPath = audioPending.localPath,
+                      sizeBytes = audioPending.sizeBytes,
+                    ),
+                    MessageAttachmentEntity(
+                      id = videoPending.id,
+                      messageId = msg.id,
+                      type = videoPending.type,
+                      displayName = videoPending.displayName,
+                      mimeType = videoPending.mimeType,
+                      localPath = videoPending.localPath,
+                      sizeBytes = videoPending.sizeBytes,
+                    ),
+                  )
+              ),
+            binaryBase64ByPath =
+              mapOf(
+                audioPending.localPath to "SUQzAw==",
+                videoPending.localPath to "AAAAGA==",
+              ),
+          )
+        val parts =
+          JSONObject(Buffer().also { req.body!!.writeTo(it) }.readUtf8())
+            .getJSONArray("contents")
+            .getJSONObject(0)
+            .getJSONArray("parts")
+        assertEquals(3, parts.length())
+        assertEquals("audio/mpeg", parts.getJSONObject(1).getJSONObject("inlineData").getString("mimeType"))
+        assertEquals("video/mp4", parts.getJSONObject(2).getJSONObject("inlineData").getString("mimeType"))
+      } finally {
+        tempDir.deleteRecursively()
+      }
+    }
+
+  @Test
+  fun `chat input bar opens camera photos files menu and renders audio video chips`() {
+    var cameraClicks = 0
+    val pending =
+      listOf(
+        PendingAttachment("a1", AttachmentTypes.AUDIO, "meeting.mp3", "audio/mpeg", "/tmp/meeting.mp3", 120L),
+        PendingAttachment("v1", AttachmentTypes.VIDEO, "demo.mp4", "video/mp4", "/tmp/demo.mp4", 480L),
+      )
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        ChatInputBar(
+          text = "",
+          onTextChange = {},
+          isGenerating = false,
+          onSend = {},
+          onStop = {},
+          pendingAttachments = pending,
+          isGeminiActive = true,
+          onAttachCameraClick = { cameraClicks++ },
+          onAttachPhotosClick = {},
+          onAttachFilesClick = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("meeting.mp3").assertIsDisplayed()
+    composeTestRule.onNodeWithText("AUDIO").assertIsDisplayed()
+    composeTestRule.onNodeWithText("demo.mp4").assertIsDisplayed()
+    composeTestRule.onNodeWithText("VIDEO").assertIsDisplayed()
+
+    composeTestRule.onNodeWithTag("attach_files_button").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("attach_option_camera").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("attach_option_photos").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("attach_option_files").assertIsDisplayed()
+
+    composeTestRule.onNodeWithTag("attach_option_camera").performClick()
+    assertEquals(1, cameraClicks)
+  }
+
+  @Test
+  fun `chat message item renders audio video bubbles and animated thinking indicator`() {
+    val userMsg =
+      MessageEntity(
+        id = "u-av",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_USER,
+        content = "Check these clips",
+        createdAt = 1L,
+      )
+    val attachments =
+      listOf(
+        MessageAttachmentEntity("a1", "u-av", AttachmentTypes.AUDIO, "memo.wav", "audio/wav", "/tmp/memo.wav", 64L),
+        MessageAttachmentEntity("v1", "u-av", AttachmentTypes.VIDEO, "clip.mov", "video/quicktime", "/tmp/clip.mov", 128L),
+      )
+    val thinkingMsg =
+      MessageEntity(
+        id = "a-think",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_ASSISTANT,
+        content = "",
+        modelId = "gemini-flash-latest",
+        createdAt = 2L,
+      )
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        LazyColumn {
+          item {
+            ChatMessageItem(
+              message = userMsg,
+              attachments = attachments,
+              displayContent = userMsg.content,
+              isStreaming = false,
+              isLastAssistantMessage = false,
+              onRegenerate = {},
+            )
+          }
+          item {
+            ChatMessageItem(
+              message = thinkingMsg,
+              displayContent = "",
+              isStreaming = true,
+              isLastAssistantMessage = true,
+              onRegenerate = {},
+            )
+          }
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithText("memo.wav", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithText("AUDIO", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithText("clip.mov", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithText("VIDEO", useUnmergedTree = true).assertIsDisplayed()
+    composeTestRule.onNodeWithTag("thinking_indicator").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Thinking").assertIsDisplayed()
+  }
+
+  @Test
+  fun `manifest declares camera and fileprovider without broad storage permissions and flags fast models`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val pm = context.packageManager
+    val pkgInfo =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getPackageInfo(
+          context.packageName,
+          PackageManager.PackageInfoFlags.of(
+            (PackageManager.GET_PERMISSIONS or PackageManager.GET_PROVIDERS).toLong()
+          ),
+        )
+      } else {
+        @Suppress("DEPRECATION")
+        pm.getPackageInfo(
+          context.packageName,
+          PackageManager.GET_PERMISSIONS or PackageManager.GET_PROVIDERS,
+        )
+      }
+
+    val permissions = pkgInfo.requestedPermissions?.toSet().orEmpty()
+    assertTrue(Manifest.permission.CAMERA in permissions)
+    assertTrue(Manifest.permission.READ_EXTERNAL_STORAGE !in permissions)
+    assertTrue("android.permission.READ_MEDIA_IMAGES" !in permissions)
+    assertTrue("android.permission.READ_MEDIA_VIDEO" !in permissions)
+
+    val expectedAuthority = "${context.packageName}.fileprovider"
+    assertTrue(pkgInfo.providers?.any { it.authority == expectedAuthority } == true)
+
+    assertTrue(
+      AiModelInfo("gemini-flash-latest", "Gemini Flash Latest", AiProvider.GEMINI).isFastModel()
+    )
+    assertTrue(
+      AiModelInfo("openai/gpt-4o-mini", "GPT-4o Mini", AiProvider.OPENROUTER).isFastModel()
+    )
+    assertTrue(
+      !AiModelInfo("anthropic/claude-opus-4", "Claude Opus 4", AiProvider.OPENROUTER).isFastModel()
+    )
   }
 }

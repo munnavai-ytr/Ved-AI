@@ -503,7 +503,9 @@ class ChatRepository(
           for (att in allAttachments) {
             when (att.type) {
               AttachmentTypes.IMAGE,
-              AttachmentTypes.PDF -> {
+              AttachmentTypes.PDF,
+              AttachmentTypes.AUDIO,
+              AttachmentTypes.VIDEO -> {
                 if (provider == AiProvider.GEMINI && !binaryBase64ByPath.containsKey(att.localPath)) {
                   val b64 = AttachmentProcessor.readFileAsBase64(appContext, att.localPath)
                   if (!b64.isNullOrBlank()) {
@@ -717,13 +719,15 @@ class ChatRepository(
       val lower = id.lowercase()
       return when {
         lower == "gemini-flash-latest" -> 100
-        lower == "gemini-pro-latest" -> 95
-        lower.contains("gemini-3") && lower.contains("flash") -> 90
-        lower.contains("gemini-3") && lower.contains("pro") -> 88
+        lower.contains("gemini-3") && lower.contains("flash") -> 96
+        lower == "gemini-pro-latest" -> 92
+        lower.contains("gemini-2.5-flash") && !lower.contains("lite") -> 90
+        lower.contains("gemini-2.5-flash") && lower.contains("lite") -> 88
+        lower.contains("gemini-3") && lower.contains("pro") -> 86
         lower.contains("gemini-3") -> 85
-        lower.contains("gemini-2.5-flash") && !lower.contains("lite") -> 80
         lower.contains("gemini-2.5-pro") -> 78
         lower.contains("gemini-2.5") -> 75
+        lower.contains("gemini-2.0") && lower.contains("flash") -> 70
         lower.contains("gemini-2.0") -> 60
         else -> 10
       }

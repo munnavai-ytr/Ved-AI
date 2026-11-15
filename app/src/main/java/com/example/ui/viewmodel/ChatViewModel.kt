@@ -18,8 +18,11 @@ import com.example.data.util.AttachmentTypes
 import com.example.data.util.PendingAttachment
 import com.example.service.AiGenerationCoordinator
 import com.example.service.GenerationRequest
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -353,8 +356,7 @@ class ChatViewModel(
         return@launch
       }
 
-      val hasBinaryAttachments =
-        attachmentsToSend.any { it.type == AttachmentTypes.IMAGE || it.type == AttachmentTypes.PDF }
+      val hasBinaryAttachments = attachmentsToSend.any { it.type != AttachmentTypes.TEXT }
       if (hasBinaryAttachments && provider != AiProvider.GEMINI) {
         _events.tryEmit(ChatUiEvent.ShowMessage("File attachments are only supported with Gemini"))
         return@launch
@@ -366,72 +368,83 @@ class ChatViewModel(
         _editingMessageId.value = null
       }
 
-      val existingId = _activeConversationId.value
-      if (existingId != null && pendingEditId != null) {
-        val currentMsgs = repository.getMessagesSync(existingId)
-        val targetMsg = currentMsgs.firstOrNull { it.id == pendingEditId }
-        if (targetMsg != null) {
-          repository.deleteMessagesFrom(existingId, targetMsg.createdAt)
-        }
-      }
-
       val titleSource =
         rawPrompt.ifBlank {
           attachmentsToSend.firstOrNull()?.displayName ?: "Attachment question"
         }
-      val isFirstTurn = existingId == null || repository.getMessagesSync(existingId).isEmpty()
 
-      val conversationTitle: String
-      val conversationId =
-        if (existingId != null) {
-          repository.updateConversationEngine(existingId, provider, modelId)
-          if (isFirstTurn) {
-            conversationTitle = buildPreliminaryTitle(titleSource)
-            repository.updateConversationTitle(existingId, conversationTitle)
-          } else {
-            conversationTitle = repository.getConversationTitle(existingId) ?: "Chat"
-          }
-          existingId
-        } else {
-          conversationTitle = buildPreliminaryTitle(titleSource)
-          val created = repository.createConversation(provider, modelId, conversationTitle)
-          _activeConversationId.value = created.id
-          created.id
+      val prepared =
+        coroutineScope {
+          val memoryDeferred = async(Dispatchers.IO) { repository.buildMemoryContextBlock() }
+          val skillDeferred =
+            async(Dispatchers.IO) {
+              repository.resolveSkillContext(
+                userPrompt = rawPrompt,
+                pinnedSkillId = pinnedSkillId,
+              )
+            }
+          val dbPrepDeferred =
+            async(Dispatchers.IO) {
+              val existingId = _activeConversationId.value
+              if (existingId != null && pendingEditId != null) {
+                val currentMsgs = repository.getMessagesSync(existingId)
+                val targetMsg = currentMsgs.firstOrNull { it.id == pendingEditId }
+                if (targetMsg != null) {
+                  repository.deleteMessagesFrom(existingId, targetMsg.createdAt)
+                }
+              }
+
+              val firstTurn = existingId == null || repository.getMessagesSync(existingId).isEmpty()
+              val convTitle: String
+              val convId =
+                if (existingId != null) {
+                  repository.updateConversationEngine(existingId, provider, modelId)
+                  if (firstTurn) {
+                    convTitle = buildPreliminaryTitle(titleSource)
+                    repository.updateConversationTitle(existingId, convTitle)
+                  } else {
+                    convTitle = repository.getConversationTitle(existingId) ?: "Chat"
+                  }
+                  existingId
+                } else {
+                  convTitle = buildPreliminaryTitle(titleSource)
+                  val created = repository.createConversation(provider, modelId, convTitle)
+                  _activeConversationId.value = created.id
+                  created.id
+                }
+
+              repository.insertUserMessage(
+                conversationId = convId,
+                content = rawPrompt,
+                attachments = attachmentsToSend,
+              )
+              val withAttachments = repository.getMessagesWithAttachmentsSync(convId)
+              Triple(convId, convTitle, Pair(firstTurn, withAttachments))
+            }
+
+          val (convId, convTitle, turnAndMessages) = dbPrepDeferred.await()
+          val (firstTurn, withAttachments) = turnAndMessages
+          val memoryContext = memoryDeferred.await()
+          val skillContext = skillDeferred.await()
+
+          GenerationRequest(
+            conversationId = convId,
+            conversationTitle = convTitle,
+            provider = provider,
+            modelId = modelId,
+            history = withAttachments.map { it.message },
+            attachmentsByMessageId = withAttachments.associate { it.message.id to it.attachments },
+            systemPrompt = prefs.systemPrompt,
+            memoryContext = memoryContext,
+            skillsIndexBlock = skillContext.skillsIndexBlock,
+            activeSkillBlock = skillContext.activeSkillBlock,
+            activeSkillName = skillContext.activeSkillName,
+            shouldAutoTitle = firstTurn,
+            firstUserPrompt = titleSource,
+          )
         }
 
-      repository.insertUserMessage(
-        conversationId = conversationId,
-        content = rawPrompt,
-        attachments = attachmentsToSend,
-      )
-
-      val withAttachments = repository.getMessagesWithAttachmentsSync(conversationId)
-      val history = withAttachments.map { it.message }
-      val attachmentsMap = withAttachments.associate { it.message.id to it.attachments }
-      val memoryContext = repository.buildMemoryContextBlock()
-      val skillContext =
-        repository.resolveSkillContext(
-          userPrompt = rawPrompt,
-          pinnedSkillId = pinnedSkillId,
-        )
-
-      generationCoordinator.startGeneration(
-        GenerationRequest(
-          conversationId = conversationId,
-          conversationTitle = conversationTitle,
-          provider = provider,
-          modelId = modelId,
-          history = history,
-          attachmentsByMessageId = attachmentsMap,
-          systemPrompt = prefs.systemPrompt,
-          memoryContext = memoryContext,
-          skillsIndexBlock = skillContext.skillsIndexBlock,
-          activeSkillBlock = skillContext.activeSkillBlock,
-          activeSkillName = skillContext.activeSkillName,
-          shouldAutoTitle = isFirstTurn,
-          firstUserPrompt = titleSource,
-        )
-      )
+      generationCoordinator.startGeneration(prepared)
     }
   }
 
@@ -458,43 +471,57 @@ class ChatViewModel(
         return@launch
       }
 
-      repository.deleteMessage(lastAssistant.id)
-      repository.updateConversationEngine(conversationId, provider, modelId)
-
-      val withAttachments = repository.getMessagesWithAttachmentsSync(conversationId)
-      val updatedHistory = withAttachments.map { it.message }
-      val attachmentsMap = withAttachments.associate { it.message.id to it.attachments }
-      val lastUserPrompt =
-        updatedHistory.lastOrNull { it.role == MessageEntity.ROLE_USER }?.content.orEmpty()
-      val memoryContext = repository.buildMemoryContextBlock()
-      val skillContext =
-        repository.resolveSkillContext(
-          userPrompt = lastUserPrompt,
-          pinnedSkillId = pinnedSkillId,
-        )
-      val firstPrompt =
-        updatedHistory.firstOrNull { it.role == MessageEntity.ROLE_USER }?.content
-          ?.ifBlank { "Attachment question" }
+      val lastUserPromptInMemory =
+        currentMessages.lastOrNull { it.message.role == MessageEntity.ROLE_USER }?.message?.content
           .orEmpty()
-      val conversationTitle = repository.getConversationTitle(conversationId) ?: "Chat"
 
-      generationCoordinator.startGeneration(
-        GenerationRequest(
-          conversationId = conversationId,
-          conversationTitle = conversationTitle,
-          provider = provider,
-          modelId = modelId,
-          history = updatedHistory,
-          attachmentsByMessageId = attachmentsMap,
-          systemPrompt = prefs.systemPrompt,
-          memoryContext = memoryContext,
-          skillsIndexBlock = skillContext.skillsIndexBlock,
-          activeSkillBlock = skillContext.activeSkillBlock,
-          activeSkillName = skillContext.activeSkillName,
-          shouldAutoTitle = updatedHistory.count { it.role == MessageEntity.ROLE_USER } == 1,
-          firstUserPrompt = firstPrompt,
-        )
-      )
+      val prepared =
+        coroutineScope {
+          val memoryDeferred = async(Dispatchers.IO) { repository.buildMemoryContextBlock() }
+          val skillDeferred =
+            async(Dispatchers.IO) {
+              repository.resolveSkillContext(
+                userPrompt = lastUserPromptInMemory,
+                pinnedSkillId = pinnedSkillId,
+              )
+            }
+          val dbPrepDeferred =
+            async(Dispatchers.IO) {
+              repository.deleteMessage(lastAssistant.id)
+              repository.updateConversationEngine(conversationId, provider, modelId)
+              val withAttachments = repository.getMessagesWithAttachmentsSync(conversationId)
+              val title = repository.getConversationTitle(conversationId) ?: "Chat"
+              withAttachments to title
+            }
+
+          val (withAttachments, conversationTitle) = dbPrepDeferred.await()
+          val memoryContext = memoryDeferred.await()
+          val skillContext = skillDeferred.await()
+          val updatedHistory = withAttachments.map { it.message }
+          val attachmentsMap = withAttachments.associate { it.message.id to it.attachments }
+          val firstPrompt =
+            updatedHistory.firstOrNull { it.role == MessageEntity.ROLE_USER }?.content
+              ?.ifBlank { "Attachment question" }
+              .orEmpty()
+
+          GenerationRequest(
+            conversationId = conversationId,
+            conversationTitle = conversationTitle,
+            provider = provider,
+            modelId = modelId,
+            history = updatedHistory,
+            attachmentsByMessageId = attachmentsMap,
+            systemPrompt = prefs.systemPrompt,
+            memoryContext = memoryContext,
+            skillsIndexBlock = skillContext.skillsIndexBlock,
+            activeSkillBlock = skillContext.activeSkillBlock,
+            activeSkillName = skillContext.activeSkillName,
+            shouldAutoTitle = updatedHistory.count { it.role == MessageEntity.ROLE_USER } == 1,
+            firstUserPrompt = firstPrompt,
+          )
+        }
+
+      generationCoordinator.startGeneration(prepared)
     }
   }
 

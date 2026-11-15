@@ -36,10 +36,17 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.MusicNote
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -50,7 +57,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -87,7 +97,10 @@ fun ChatInputBar(
   onCancelEdit: () -> Unit = {},
   pendingAttachments: List<PendingAttachment> = emptyList(),
   isGeminiActive: Boolean = true,
+  onAttachCameraClick: () -> Unit = {},
+  onAttachPhotosClick: () -> Unit = {},
   onAttachFilesClick: () -> Unit = {},
+  onAttachUnsupportedClick: () -> Unit = {},
   onRemoveAttachment: (String) -> Unit = {},
   hasEnabledSkills: Boolean = false,
   pinnedSkill: SkillEntity? = null,
@@ -96,6 +109,7 @@ fun ChatInputBar(
 ) {
   val haptic = LocalHapticFeedback.current
   val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
+  var showAttachMenu by remember { mutableStateOf(false) }
 
   Box(
     modifier =
@@ -211,22 +225,71 @@ fun ChatInputBar(
           modifier = Modifier.padding(start = 6.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
           verticalAlignment = Alignment.Bottom,
         ) {
-          IconButton(
-            onClick = {
-              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-              onAttachFilesClick()
-            },
-            enabled = !isGenerating,
-            modifier = Modifier.size(48.dp).testTag("attach_files_button"),
-          ) {
-            Icon(
-              imageVector = Icons.Outlined.AttachFile,
-              contentDescription = stringResource(R.string.cd_attach_files),
-              tint =
-                if (isGeminiActive && !isGenerating) MaterialTheme.colorScheme.onSurfaceVariant
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-              modifier = Modifier.size(22.dp),
-            )
+          Box {
+            IconButton(
+              onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                if (isGeminiActive) {
+                  showAttachMenu = true
+                } else {
+                  onAttachUnsupportedClick()
+                }
+              },
+              enabled = !isGenerating,
+              modifier = Modifier.size(48.dp).testTag("attach_files_button"),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.AttachFile,
+                contentDescription = stringResource(R.string.cd_attach_files),
+                tint =
+                  if (isGeminiActive && !isGenerating) MaterialTheme.colorScheme.onSurfaceVariant
+                  else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                modifier = Modifier.size(22.dp),
+              )
+            }
+
+            DropdownMenu(
+              expanded = showAttachMenu,
+              onDismissRequest = { showAttachMenu = false },
+              modifier = Modifier.testTag("attach_options_menu"),
+            ) {
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.chat_attach_camera)) },
+                leadingIcon = {
+                  Icon(imageVector = Icons.Outlined.PhotoCamera, contentDescription = null)
+                },
+                onClick = {
+                  showAttachMenu = false
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  onAttachCameraClick()
+                },
+                modifier = Modifier.testTag("attach_option_camera"),
+              )
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.chat_attach_photos)) },
+                leadingIcon = {
+                  Icon(imageVector = Icons.Outlined.PhotoLibrary, contentDescription = null)
+                },
+                onClick = {
+                  showAttachMenu = false
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  onAttachPhotosClick()
+                },
+                modifier = Modifier.testTag("attach_option_photos"),
+              )
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.chat_attach_files)) },
+                leadingIcon = {
+                  Icon(imageVector = Icons.Outlined.FolderOpen, contentDescription = null)
+                },
+                onClick = {
+                  showAttachMenu = false
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  onAttachFilesClick()
+                },
+                modifier = Modifier.testTag("attach_option_files"),
+              )
+            }
           }
 
           if (hasEnabledSkills && pinnedSkill == null) {
@@ -379,7 +442,21 @@ private fun PendingAttachmentChip(
       }
     }
   } else {
-    val isPdf = attachment.type == AttachmentTypes.PDF
+    val icon =
+      when (attachment.type) {
+        AttachmentTypes.PDF -> Icons.Outlined.PictureAsPdf
+        AttachmentTypes.AUDIO -> Icons.Outlined.MusicNote
+        AttachmentTypes.VIDEO -> Icons.Outlined.Videocam
+        else -> Icons.Outlined.Description
+      }
+    val badgeText =
+      when (attachment.type) {
+        AttachmentTypes.PDF -> stringResource(R.string.chat_attachment_pdf_badge)
+        AttachmentTypes.AUDIO -> stringResource(R.string.chat_attachment_audio_badge)
+        AttachmentTypes.VIDEO -> stringResource(R.string.chat_attachment_video_badge)
+        else -> null
+      }
+
     Surface(
       shape = RoundedCornerShape(12.dp),
       color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -391,7 +468,7 @@ private fun PendingAttachmentChip(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
         Icon(
-          imageVector = if (isPdf) Icons.Outlined.PictureAsPdf else Icons.Outlined.Description,
+          imageVector = icon,
           contentDescription = null,
           tint = MaterialTheme.colorScheme.primary,
           modifier = Modifier.size(18.dp),
@@ -404,9 +481,9 @@ private fun PendingAttachmentChip(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
           )
-          if (isPdf) {
+          if (badgeText != null) {
             Text(
-              text = stringResource(R.string.chat_attachment_pdf_badge),
+              text = badgeText,
               style = MaterialTheme.typography.labelSmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

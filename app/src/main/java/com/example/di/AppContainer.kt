@@ -12,7 +12,9 @@ import com.example.service.AiGenerationCoordinator
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import java.util.concurrent.TimeUnit
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 
@@ -24,9 +26,12 @@ class AppContainer(context: Context) {
 
   val okHttpClient: OkHttpClient by lazy {
     OkHttpClient.Builder()
-      .connectTimeout(20, TimeUnit.SECONDS)
-      .readTimeout(120, TimeUnit.SECONDS)
-      .writeTimeout(20, TimeUnit.SECONDS)
+      .connectTimeout(15, TimeUnit.SECONDS)
+      .readTimeout(0, TimeUnit.SECONDS)
+      .writeTimeout(30, TimeUnit.SECONDS)
+      .callTimeout(0, TimeUnit.SECONDS)
+      .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+      .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
       .retryOnConnectionFailure(true)
       .build()
   }

@@ -39,7 +39,17 @@ data class AiModelInfo(
   val provider: AiProvider,
   val contextLength: Int? = null,
   val isFree: Boolean = false,
-)
+) {
+  fun isFastModel(): Boolean {
+    val combined = "$id $name".lowercase()
+    return combined.contains("flash") ||
+      combined.contains("lite") ||
+      combined.contains("mini") ||
+      combined.contains("haiku") ||
+      combined.contains("instant") ||
+      combined.contains("fast")
+  }
+}
 
 /**
  * Last-resort fallback Gemini models used ONLY if the live `/v1beta/models` endpoint is

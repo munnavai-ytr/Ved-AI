@@ -1,8 +1,15 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,11 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
@@ -35,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -160,6 +171,8 @@ private fun UserMessageBubble(
             when (att.type) {
               AttachmentTypes.IMAGE -> MessageImageThumbnail(pathOrUri = att.localPath)
               AttachmentTypes.PDF,
+              AttachmentTypes.AUDIO,
+              AttachmentTypes.VIDEO,
               AttachmentTypes.TEXT -> MessageFileAttachmentChip(attachment = att)
             }
           }
@@ -224,7 +237,21 @@ private fun MessageImageThumbnail(pathOrUri: String) {
 
 @Composable
 private fun MessageFileAttachmentChip(attachment: MessageAttachmentEntity) {
-  val isPdf = attachment.type == AttachmentTypes.PDF
+  val icon =
+    when (attachment.type) {
+      AttachmentTypes.PDF -> Icons.Outlined.PictureAsPdf
+      AttachmentTypes.AUDIO -> Icons.Outlined.MusicNote
+      AttachmentTypes.VIDEO -> Icons.Outlined.Videocam
+      else -> Icons.Outlined.Description
+    }
+  val badgeText =
+    when (attachment.type) {
+      AttachmentTypes.PDF -> stringResource(R.string.chat_attachment_pdf_badge)
+      AttachmentTypes.AUDIO -> stringResource(R.string.chat_attachment_audio_badge)
+      AttachmentTypes.VIDEO -> stringResource(R.string.chat_attachment_video_badge)
+      else -> null
+    }
+
   Surface(
     shape = RoundedCornerShape(12.dp),
     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
@@ -236,7 +263,7 @@ private fun MessageFileAttachmentChip(attachment: MessageAttachmentEntity) {
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       Icon(
-        imageVector = if (isPdf) Icons.Outlined.PictureAsPdf else Icons.Outlined.Description,
+        imageVector = icon,
         contentDescription = null,
         tint = MaterialTheme.colorScheme.primary,
         modifier = Modifier.size(18.dp),
@@ -249,13 +276,13 @@ private fun MessageFileAttachmentChip(attachment: MessageAttachmentEntity) {
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.weight(1f),
       )
-      if (isPdf) {
+      if (badgeText != null) {
         Surface(
           shape = RoundedCornerShape(6.dp),
           color = MaterialTheme.colorScheme.primaryContainer,
         ) {
           Text(
-            text = stringResource(R.string.chat_attachment_pdf_badge),
+            text = badgeText,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onPrimaryContainer,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -338,11 +365,7 @@ private fun AssistantMessageBlock(
 
     // Body
     if (content.isBlank() && isStreaming) {
-      Text(
-        text = "Thinking…",
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
+      ThinkingIndicator(modifier = Modifier.padding(vertical = 2.dp))
     } else if (isError) {
       Surface(
         shape = RoundedCornerShape(16.dp),
@@ -424,6 +447,43 @@ private fun AssistantMessageBlock(
             modifier = Modifier.padding(end = 4.dp).testTag("message_token_count"),
           )
         }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ThinkingIndicator(modifier: Modifier = Modifier) {
+  val transition = rememberInfiniteTransition(label = "thinking_dots")
+  val dotColor = MaterialTheme.colorScheme.onSurfaceVariant
+
+  Row(
+    modifier = modifier.testTag("thinking_indicator"),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    Text(
+      text = stringResource(R.string.chat_thinking),
+      style = MaterialTheme.typography.bodyMedium,
+      color = dotColor,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+      repeat(3) { index ->
+        val alpha by
+          transition.animateFloat(
+            initialValue = 0.25f,
+            targetValue = 0.95f,
+            animationSpec =
+              infiniteRepeatable(
+                animation = tween(durationMillis = 600, delayMillis = index * 160),
+                repeatMode = RepeatMode.Reverse,
+              ),
+            label = "thinking_dot_$index",
+          )
+        Box(
+          modifier =
+            Modifier.size(5.dp).alpha(alpha).clip(CircleShape).background(dotColor)
+        )
       }
     }
   }

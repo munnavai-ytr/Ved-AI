@@ -567,7 +567,19 @@ private fun GeminiModelDropdown(
             DropdownMenuItem(
               text = {
                 Column {
-                  Text(text = model.name, style = MaterialTheme.typography.bodyLarge)
+                  Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                  ) {
+                    Text(
+                      text = model.name,
+                      style = MaterialTheme.typography.bodyLarge,
+                      modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (model.isFastModel()) {
+                      FastModelBadge()
+                    }
+                  }
                   Text(
                     text = model.id,
                     style = MaterialTheme.typography.labelSmall,
@@ -773,12 +785,21 @@ private fun OpenRouterModelPickerSheet(
               horizontalArrangement = Arrangement.SpaceBetween,
             ) {
               Column(modifier = Modifier.weight(1f)) {
-                Text(
-                  text = model.name,
-                  style = MaterialTheme.typography.bodyMedium,
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                  Text(
+                    text = model.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                  )
+                  if (model.isFastModel()) {
+                    FastModelBadge()
+                  }
+                }
                 Text(
                   text = model.id,
                   style = MaterialTheme.typography.labelSmall,
@@ -800,6 +821,22 @@ private fun OpenRouterModelPickerSheet(
         }
       }
     }
+  }
+}
+
+@Composable
+private fun FastModelBadge(modifier: Modifier = Modifier) {
+  Surface(
+    shape = RoundedCornerShape(6.dp),
+    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f),
+    modifier = modifier.testTag("fast_model_badge"),
+  ) {
+    Text(
+      text = stringResource(R.string.model_fast_badge),
+      style = MaterialTheme.typography.labelSmall,
+      color = MaterialTheme.colorScheme.onPrimaryContainer,
+      modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+    )
   }
 }
 

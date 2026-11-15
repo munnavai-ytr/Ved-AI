@@ -12,6 +12,7 @@ import com.example.data.remote.StreamChunk
 import com.example.data.repository.ChatRepository
 import com.example.data.util.ExtractedMemory
 import com.example.data.util.MemoryPromptHelper
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -95,6 +96,7 @@ class AiGenerationCoordinator(
   private data class ActiveRunData(
     val request: GenerationRequest,
     val placeholderMessageId: String,
+    val started: AtomicBoolean = AtomicBoolean(false),
   )
 
   internal fun attachServiceCallbacks(callbacks: ServiceCallbacks?) {
@@ -102,8 +104,9 @@ class AiGenerationCoordinator(
   }
 
   /**
-   * Inserts the assistant placeholder, marks state as generating, and launches
-   * [AiGenerationService] (with in-process fallback if the OS blocks FGS start).
+   * Inserts the assistant placeholder, marks state as generating, immediately starts the HTTP
+   * streaming run so connection establishment does not wait on Service IPC, and starts
+   * [AiGenerationService] for background persistence.
    */
   suspend fun startGeneration(request: GenerationRequest) {
     cancelInternal(savePartial = false)
@@ -125,28 +128,25 @@ class AiGenerationCoordinator(
       )
     pendingRunData = ActiveRunData(request = request, placeholderMessageId = placeholder.id)
 
-    val serviceStarted =
-      try {
-        val intent =
-          AiGenerationService.createStartIntent(
-            context = appContext,
-            conversationId = request.conversationId,
-            conversationTitle = request.conversationTitle,
-          )
-        ContextCompat.startForegroundService(appContext, intent)
-        true
-      } catch (t: Throwable) {
-        Log.w(TAG, "Foreground service unavailable; running generation directly in coordinator", t)
-        false
-      }
+    // Begin socket connection immediately without waiting for Service.onStartCommand IPC latency.
+    executeActiveRunIfNeeded()
 
-    if (!serviceStarted) {
-      executeActiveRunIfNeeded()
+    try {
+      val intent =
+        AiGenerationService.createStartIntent(
+          context = appContext,
+          conversationId = request.conversationId,
+          conversationTitle = request.conversationTitle,
+        )
+      ContextCompat.startForegroundService(appContext, intent)
+    } catch (t: Throwable) {
+      Log.w(TAG, "Foreground service unavailable; running generation directly in coordinator", t)
     }
   }
 
   internal fun executeActiveRunIfNeeded() {
     val runData = pendingRunData ?: return
+    if (!runData.started.compareAndSet(false, true)) return
     if (activeJob?.isActive == true) return
     pendingRunData = null
 
@@ -394,6 +394,6 @@ class AiGenerationCoordinator(
 
   private companion object {
     const val TAG = "AiGenerationCoordinator"
-    const val STREAM_EMIT_INTERVAL_MS = 48L
+    const val STREAM_EMIT_INTERVAL_MS = 32L
   }
 }
