@@ -175,6 +175,15 @@ fun SkillsScreen(
       modifier = Modifier.fillMaxSize().padding(innerPadding),
       contentAlignment = Alignment.TopCenter,
     ) {
+      val builtInSkills =
+        remember(uiState.skills) {
+          uiState.skills.filter { it.skill.source == SkillEntity.SOURCE_SYSTEM }
+        }
+      val customSkills =
+        remember(uiState.skills) {
+          uiState.skills.filter { it.skill.source != SkillEntity.SOURCE_SYSTEM }
+        }
+
       if (uiState.skills.isEmpty()) {
         SkillsEmptyState(
           modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -183,28 +192,173 @@ fun SkillsScreen(
         LazyColumn(
           contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 96.dp),
           verticalArrangement = Arrangement.spacedBy(12.dp),
-          modifier = Modifier.fillMaxSize().widthIn(max = 620.dp).navigationBarsPadding(),
+          modifier =
+            Modifier.fillMaxSize()
+              .widthIn(max = 620.dp)
+              .navigationBarsPadding()
+              .testTag("skills_list"),
         ) {
-          items(items = uiState.skills, key = { it.skill.id }) { item ->
-            SkillCard(
-              item = item,
-              onClick = { onEditSkill(item.skill.id) },
-              onToggleEnabled = { enabled -> viewModel.setSkillEnabled(item.skill.id, enabled) },
-              onExport = {
-                pendingExportSkill = item.skill
-                val slug =
-                  item.skill.name
-                    .lowercase()
-                    .replace(Regex("[^a-z0-9]+"), "-")
-                    .trim('-')
-                    .ifEmpty { "skill" }
-                exportSkillLauncher.launch("$slug.md")
-              },
-              onDelete = { viewModel.deleteSkill(item.skill.id) },
+          if (builtInSkills.isNotEmpty()) {
+            item(key = "header_built_in") {
+              Text(
+                text = stringResource(R.string.skills_section_built_in),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier =
+                  Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                    .testTag("skills_section_built_in"),
+              )
+            }
+            items(items = builtInSkills, key = { it.skill.id }) { item ->
+              BuiltInSkillCard(
+                item = item,
+                onToggleEnabled = { enabled ->
+                  viewModel.setSkillEnabled(item.skill.id, enabled)
+                },
+              )
+            }
+          }
+
+          item(key = "header_custom") {
+            Text(
+              text = stringResource(R.string.skills_section_custom),
+              style = MaterialTheme.typography.titleSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier =
+                Modifier.padding(
+                  start = 4.dp,
+                  end = 4.dp,
+                  top = if (builtInSkills.isNotEmpty()) 8.dp else 2.dp,
+                  bottom = 2.dp,
+                ),
             )
+          }
+
+          if (customSkills.isEmpty()) {
+            item(key = "custom_empty_hint") {
+              CustomSkillsHintCard(
+                modifier = Modifier.fillMaxWidth().testTag("skills_custom_empty_hint"),
+              )
+            }
+          } else {
+            items(items = customSkills, key = { it.skill.id }) { item ->
+              SkillCard(
+                item = item,
+                onClick = { onEditSkill(item.skill.id) },
+                onToggleEnabled = { enabled -> viewModel.setSkillEnabled(item.skill.id, enabled) },
+                onExport = {
+                  pendingExportSkill = item.skill
+                  val slug =
+                    item.skill.name
+                      .lowercase()
+                      .replace(Regex("[^a-z0-9]+"), "-")
+                      .trim('-')
+                      .ifEmpty { "skill" }
+                  exportSkillLauncher.launch("$slug.md")
+                },
+                onDelete = { viewModel.deleteSkill(item.skill.id) },
+              )
+            }
           }
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun BuiltInSkillCard(
+  item: SkillWithFiles,
+  onToggleEnabled: (Boolean) -> Unit,
+) {
+  val skill = item.skill
+  Surface(
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 2.dp,
+    modifier = Modifier.fillMaxWidth().testTag("skill_card_${skill.id}"),
+  ) {
+    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.AutoAwesome,
+          contentDescription = null,
+          tint = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.size(20.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Text(
+              text = skill.name,
+              style = MaterialTheme.typography.titleMedium,
+              color = MaterialTheme.colorScheme.onSurface,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              modifier = Modifier.weight(1f, fill = false),
+            )
+            Surface(
+              shape = RoundedCornerShape(8.dp),
+              color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+            ) {
+              Text(
+                text = stringResource(R.string.skills_source_built_in),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+              )
+            }
+          }
+          if (skill.description.isNotBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+              text = skill.description,
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 3,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+
+        Switch(
+          checked = skill.isEnabled,
+          onCheckedChange = onToggleEnabled,
+          modifier = Modifier.testTag("skill_toggle_${skill.id}"),
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun CustomSkillsHintCard(modifier: Modifier = Modifier) {
+  Surface(
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surfaceContainerLow,
+    modifier = modifier,
+  ) {
+    Row(
+      modifier = Modifier.padding(16.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Icon(
+        imageVector = Icons.Outlined.AutoAwesome,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.size(22.dp),
+      )
+      Text(
+        text = stringResource(R.string.skills_custom_empty_hint),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
     }
   }
 }
@@ -219,8 +373,11 @@ private fun SkillCard(
 ) {
   val skill = item.skill
   val sourceLabel =
-    if (skill.source == SkillEntity.SOURCE_IMPORTED) stringResource(R.string.skills_source_imported)
-    else stringResource(R.string.skills_source_user)
+    when (skill.source) {
+      SkillEntity.SOURCE_IMPORTED -> stringResource(R.string.skills_source_imported)
+      SkillEntity.SOURCE_SYSTEM -> stringResource(R.string.skills_source_built_in)
+      else -> stringResource(R.string.skills_source_user)
+    }
 
   Surface(
     onClick = onClick,

@@ -16,6 +16,7 @@ import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
 import com.example.data.local.entity.SkillEntity
 import com.example.data.local.entity.SkillFileEntity
+import com.example.data.util.SkillCreatorHelper
 
 /**
  * Local Room database storing chat sessions, folders, messages, file attachments,
@@ -192,9 +193,43 @@ abstract class VedDatabase : RoomDatabase() {
         }
       }
 
+    val SEED_SYSTEM_SKILLS_CALLBACK: RoomDatabase.Callback =
+      object : RoomDatabase.Callback() {
+        override fun onCreate(db: SupportSQLiteDatabase) {
+          super.onCreate(db)
+          seedSystemSkillCreator(db)
+        }
+
+        override fun onOpen(db: SupportSQLiteDatabase) {
+          super.onOpen(db)
+          seedSystemSkillCreator(db)
+        }
+      }
+
+    internal fun seedSystemSkillCreator(db: SupportSQLiteDatabase) {
+      val creator = SkillCreatorHelper.buildSystemSkillCreatorEntity()
+      db.execSQL(
+        """
+        INSERT OR IGNORE INTO `skills` (`id`, `name`, `description`, `skillMarkdown`, `isEnabled`, `source`, `createdAt`, `updatedAt`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent(),
+        arrayOf<Any>(
+          creator.id,
+          creator.name,
+          creator.description,
+          creator.skillMarkdown,
+          if (creator.isEnabled) 1 else 0,
+          creator.source,
+          creator.createdAt,
+          creator.updatedAt,
+        ),
+      )
+    }
+
     fun create(context: Context): VedDatabase =
       Room.databaseBuilder(context.applicationContext, VedDatabase::class.java, DB_NAME)
         .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+        .addCallback(SEED_SYSTEM_SKILLS_CALLBACK)
         .build()
   }
 }

@@ -7,19 +7,25 @@ import androidx.core.content.ContextCompat
 import com.example.data.local.entity.MemoryEntity
 import com.example.data.local.entity.MessageAttachmentEntity
 import com.example.data.local.entity.MessageEntity
+import com.example.data.local.entity.SkillEntity
 import com.example.data.model.AiProvider
 import com.example.data.remote.StreamChunk
 import com.example.data.repository.ChatRepository
 import com.example.data.util.ExtractedMemory
 import com.example.data.util.MemoryPromptHelper
+import com.example.data.util.SkillCreateParseResult
+import com.example.data.util.SkillCreatorHelper
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.transform
@@ -39,6 +45,14 @@ data class SuggestedRepliesState(
   val replies: List<String> = emptyList(),
 )
 
+@Immutable
+data class CreatedSkillBannerState(
+  val conversationId: String,
+  val messageId: String,
+  val skillId: String,
+  val skillName: String,
+)
+
 data class GenerationRequest(
   val conversationId: String,
   val conversationTitle: String,
@@ -51,6 +65,7 @@ data class GenerationRequest(
   val skillsIndexBlock: String,
   val activeSkillBlock: String,
   val activeSkillName: String?,
+  val activeSkillId: String? = null,
   val shouldAutoTitle: Boolean,
   val firstUserPrompt: String,
   val includeSuggestedReplies: Boolean = true,
@@ -62,6 +77,7 @@ private sealed interface ThrottledStreamEvent {
   data class Completed(
     val finalText: String,
     val extractedMemories: List<ExtractedMemory>,
+    val skillCreateResult: SkillCreateParseResult,
     val promptTokens: Int?,
     val completionTokens: Int?,
   ) : ThrottledStreamEvent
@@ -92,6 +108,12 @@ class AiGenerationCoordinator(
 
   private val _suggestedReplies = MutableStateFlow(SuggestedRepliesState())
   val suggestedReplies: StateFlow<SuggestedRepliesState> = _suggestedReplies.asStateFlow()
+
+  private val _createdSkillBanner = MutableStateFlow<CreatedSkillBannerState?>(null)
+  val createdSkillBanner: StateFlow<CreatedSkillBannerState?> = _createdSkillBanner.asStateFlow()
+
+  private val _skillCreationError = MutableSharedFlow<String>(extraBufferCapacity = 4)
+  val skillCreationError: SharedFlow<String> = _skillCreationError.asSharedFlow()
 
   @Volatile private var activeJob: Job? = null
   @Volatile private var pendingRunData: ActiveRunData? = null
@@ -190,6 +212,9 @@ class AiGenerationCoordinator(
 
           val buffer = StringBuilder(512)
           var lastEmitTimeMs = 0L
+          val isSkillCreatorActive =
+            req.activeSkillId == SkillEntity.SYSTEM_SKILL_CREATOR_ID ||
+              req.activeSkillName == SkillCreatorHelper.SYSTEM_SKILL_CREATOR_NAME
 
           repository
             .streamResponse(
@@ -212,27 +237,50 @@ class AiGenerationCoordinator(
                     val snapshot = buffer.toString()
                     latestPartialText = snapshot
                     lastEmitTimeMs = now
-                    emit(
-                      ThrottledStreamEvent.Progress(
+                    val visibleText =
+                      if (isSkillCreatorActive) {
+                        SkillCreatorHelper.stripStreamingSkillCreatorTags(
+                          MemoryPromptHelper.stripStreamingTags(snapshot)
+                        )
+                      } else {
                         MemoryPromptHelper.stripStreamingTags(snapshot)
-                      )
-                    )
+                      }
+                    emit(ThrottledStreamEvent.Progress(visibleText))
                   }
                 }
                 is StreamChunk.Completed -> {
-                  val parsed = MemoryPromptHelper.extractAndStripMemories(buffer.toString())
-                  latestPartialText = parsed.cleanText
+                  val parsedMemories = MemoryPromptHelper.extractAndStripMemories(buffer.toString())
+                  val skillCreateResult =
+                    if (isSkillCreatorActive || parsedMemories.cleanText.contains("[SKILL_CREATE]")) {
+                      SkillCreatorHelper.extractAndStripSkillCreate(parsedMemories.cleanText)
+                    } else {
+                      SkillCreateParseResult.NotPresent(parsedMemories.cleanText)
+                    }
+                  val finalCleanText =
+                    when (skillCreateResult) {
+                      is SkillCreateParseResult.NotPresent -> skillCreateResult.cleanText
+                      is SkillCreateParseResult.Created -> skillCreateResult.cleanText
+                      is SkillCreateParseResult.Malformed -> skillCreateResult.cleanText
+                    }
+                  latestPartialText = finalCleanText
                   emit(
                     ThrottledStreamEvent.Completed(
-                      finalText = parsed.cleanText,
-                      extractedMemories = parsed.extractedMemories,
+                      finalText = finalCleanText,
+                      extractedMemories = parsedMemories.extractedMemories,
+                      skillCreateResult = skillCreateResult,
                       promptTokens = chunk.promptTokens,
                       completionTokens = chunk.completionTokens,
                     )
                   )
                 }
                 is StreamChunk.Error -> {
-                  val partial = MemoryPromptHelper.stripStreamingTags(buffer.toString()).trim()
+                  val strippedMem = MemoryPromptHelper.stripStreamingTags(buffer.toString())
+                  val partial =
+                    if (isSkillCreatorActive) {
+                      SkillCreatorHelper.stripStreamingSkillCreatorTags(strippedMem).trim()
+                    } else {
+                      strippedMem.trim()
+                    }
                   latestPartialText = partial
                   emit(ThrottledStreamEvent.Error(partial, chunk.message))
                 }
@@ -245,8 +293,53 @@ class AiGenerationCoordinator(
                   _streamingText.value = event.accumulatedText
                 }
                 is ThrottledStreamEvent.Completed -> {
-                  val finalText = event.finalText
+                  var createdSkillSavedName: String? = null
+                  var skillCreationFailed = false
+
+                  when (val skillRes = event.skillCreateResult) {
+                    is SkillCreateParseResult.Created -> {
+                      val savedResult =
+                        runCatching {
+                          repository.createSkillFromConversation(
+                            name = skillRes.name,
+                            description = skillRes.description,
+                            skillMarkdown = skillRes.skillMarkdown,
+                            files = skillRes.files,
+                          )
+                        }
+                      savedResult
+                        .onSuccess { createdSkill ->
+                          createdSkillSavedName = createdSkill.name
+                          _createdSkillBanner.value =
+                            CreatedSkillBannerState(
+                              conversationId = req.conversationId,
+                              messageId = placeholderId,
+                              skillId = createdSkill.id,
+                              skillName = createdSkill.name,
+                            )
+                        }
+                        .onFailure {
+                          skillCreationFailed = true
+                          _skillCreationError.tryEmit(SKILL_CREATION_FALLBACK_ERROR)
+                        }
+                    }
+                    is SkillCreateParseResult.Malformed -> {
+                      skillCreationFailed = true
+                      _skillCreationError.tryEmit(SKILL_CREATION_FALLBACK_ERROR)
+                    }
+                    is SkillCreateParseResult.NotPresent -> Unit
+                  }
+
+                  val finalText =
+                    when {
+                      event.finalText.isNotEmpty() -> event.finalText
+                      createdSkillSavedName != null -> "Saved skill \"$createdSkillSavedName\"."
+                      skillCreationFailed ->
+                        "I couldn't save the skill automatically, but you can still create it manually in Settings → Skills."
+                      else -> ""
+                    }
                   _streamingText.value = finalText
+
                   if (finalText.isNotEmpty()) {
                     repository.updateAssistantMessage(
                       messageId = placeholderId,
@@ -381,11 +474,18 @@ class AiGenerationCoordinator(
     _suggestedReplies.value = SuggestedRepliesState()
   }
 
+  fun clearCreatedSkillBanner() {
+    _createdSkillBanner.value = null
+  }
+
   private fun cancelInternal(savePartial: Boolean) {
     val currentMeta = _generationMeta.value
     val placeholderId = currentMeta.streamingMessageId
     val convId = currentMeta.conversationId
-    val partial = MemoryPromptHelper.stripStreamingTags(latestPartialText).trim()
+    val partial =
+      SkillCreatorHelper.stripStreamingSkillCreatorTags(
+        MemoryPromptHelper.stripStreamingTags(latestPartialText)
+      ).trim()
 
     latestRunToken = System.nanoTime()
     pendingRunData = null
@@ -463,5 +563,7 @@ class AiGenerationCoordinator(
   private companion object {
     const val TAG = "AiGenerationCoordinator"
     const val STREAM_EMIT_INTERVAL_MS = 32L
+    const val SKILL_CREATION_FALLBACK_ERROR =
+      "Couldn't save the skill automatically, you can still create it manually in Settings → Skills"
   }
 }

@@ -34,13 +34,16 @@ interface SkillDao {
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertSkill(skill: SkillEntity)
 
+  @Insert(onConflict = OnConflictStrategy.IGNORE)
+  suspend fun insertSkillIgnoreConflict(skill: SkillEntity)
+
   @Update
   suspend fun updateSkill(skill: SkillEntity)
 
   @Query("UPDATE skills SET isEnabled = :enabled, updatedAt = :updatedAt WHERE id = :skillId")
   suspend fun setSkillEnabled(skillId: String, enabled: Boolean, updatedAt: Long)
 
-  @Query("DELETE FROM skills WHERE id = :skillId")
+  @Query("DELETE FROM skills WHERE id = :skillId AND source != 'system'")
   suspend fun deleteSkillById(skillId: String)
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)

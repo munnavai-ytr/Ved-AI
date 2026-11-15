@@ -77,6 +77,8 @@ class SkillsViewModel(private val repository: ChatRepository) : ViewModel() {
   }
 
   fun deleteSkill(skillId: String) {
+    val target = uiState.value.skills.firstOrNull { it.skill.id == skillId }?.skill
+    if (target?.source == SkillEntity.SOURCE_SYSTEM) return
     viewModelScope.launch {
       repository.deleteSkill(skillId)
       _feedbackMessage.value = "Skill deleted"
@@ -151,7 +153,7 @@ class SkillsViewModel(private val repository: ChatRepository) : ViewModel() {
     viewModelScope.launch {
       _editorDraft.value = SkillEditorDraft(skillId = skillId, isLoading = true)
       val loaded = repository.getSkillWithFiles(skillId)
-      if (loaded != null) {
+      if (loaded != null && loaded.skill.source != SkillEntity.SOURCE_SYSTEM) {
         _editorDraft.value =
           SkillEditorDraft(
             skillId = loaded.skill.id,
@@ -228,6 +230,7 @@ class SkillsViewModel(private val repository: ChatRepository) : ViewModel() {
 
   fun saveDraft(onSaved: () -> Unit) {
     val draft = _editorDraft.value
+    if (draft.source == SkillEntity.SOURCE_SYSTEM) return
     if (draft.name.isBlank()) {
       _events.tryEmit(SkillsUiEvent.ShowMessage("Please enter a skill name."))
       return

@@ -29,6 +29,8 @@ data class SkillEntity(
   companion object {
     const val SOURCE_USER = "user"
     const val SOURCE_IMPORTED = "imported"
+    const val SOURCE_SYSTEM = "system"
+    const val SYSTEM_SKILL_CREATOR_ID = "system-skill-creator"
   }
 }
 

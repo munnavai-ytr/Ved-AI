@@ -87,6 +87,7 @@ import com.example.data.local.entity.SkillEntity
 import com.example.data.util.AttachmentTypes
 import com.example.data.util.ImageProcessor
 import com.example.data.util.PendingAttachment
+import com.example.data.util.SlashCommandSuggestion
 
 /**
  * Fixed, elevated bottom composer bar with optional editing banner, multi-file attachment
@@ -112,6 +113,9 @@ fun ChatInputBar(
   hasEnabledSkills: Boolean = false,
   pinnedSkill: SkillEntity? = null,
   onOpenSkillPicker: () -> Unit = {},
+  onClearPinnedSkill: () -> Unit = {},
+  slashSuggestions: List<SlashCommandSuggestion> = emptyList(),
+  onSlashCommandSelected: (SlashCommandSuggestion) -> Unit = {},
   isListening: Boolean = false,
   onVoiceInputClick: () -> Unit = {},
   modifier: Modifier = Modifier,
@@ -119,6 +123,7 @@ fun ChatInputBar(
   val haptic = LocalHapticFeedback.current
   val canSend = text.isNotBlank() || pendingAttachments.isNotEmpty()
   var showAttachMenu by remember { mutableStateOf(false) }
+  val showSlashPopup = slashSuggestions.isNotEmpty() && !isGenerating && !isEditing
 
   Box(
     modifier =
@@ -129,13 +134,27 @@ fun ChatInputBar(
         .padding(horizontal = 14.dp, vertical = 10.dp),
     contentAlignment = Alignment.Center,
   ) {
-    Surface(
-      shape = RoundedCornerShape(22.dp),
-      color = MaterialTheme.colorScheme.surface,
-      tonalElevation = 4.dp,
-      shadowElevation = 6.dp,
+    Column(
       modifier = Modifier.fillMaxWidth().widthIn(max = 680.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+      AnimatedVisibility(visible = showSlashPopup) {
+        SlashCommandPopup(
+          suggestions = slashSuggestions,
+          onSelect = { suggestion ->
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            onSlashCommandSelected(suggestion)
+          },
+        )
+      }
+
+      Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 4.dp,
+        shadowElevation = 6.dp,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
       Column(modifier = Modifier.fillMaxWidth()) {
         AnimatedVisibility(visible = isEditing) {
           Column(modifier = Modifier.fillMaxWidth()) {
@@ -201,18 +220,26 @@ fun ChatInputBar(
         }
 
         if (pinnedSkill != null) {
+          val isCreator = pinnedSkill.id == SkillEntity.SYSTEM_SKILL_CREATOR_ID
+          val pillLabel =
+            if (isCreator) {
+              stringResource(R.string.chat_skill_creator_active_pill)
+            } else {
+              stringResource(R.string.chat_skill_pill, pinnedSkill.name)
+            }
           Row(
             modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
           ) {
             Surface(
               onClick = onOpenSkillPicker,
               shape = RoundedCornerShape(10.dp),
-              color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
-              modifier = Modifier.heightIn(min = 32.dp).testTag("pinned_skill_chip"),
+              color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+              modifier = Modifier.heightIn(min = 34.dp).testTag("pinned_skill_chip"),
             ) {
               Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
               ) {
@@ -223,11 +250,29 @@ fun ChatInputBar(
                   modifier = Modifier.size(14.dp),
                 )
                 Text(
-                  text = stringResource(R.string.chat_skill_pill, pinnedSkill.name),
+                  text = pillLabel,
                   style = MaterialTheme.typography.labelMedium,
                   color = MaterialTheme.colorScheme.onSurface,
                   maxLines = 1,
                   overflow = TextOverflow.Ellipsis,
+                )
+              }
+            }
+            Surface(
+              onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                onClearPinnedSkill()
+              },
+              shape = CircleShape,
+              color = MaterialTheme.colorScheme.surfaceContainerHigh,
+              modifier = Modifier.size(32.dp).testTag("clear_pinned_skill_button"),
+            ) {
+              Box(contentAlignment = Alignment.Center) {
+                Icon(
+                  imageVector = Icons.Rounded.Close,
+                  contentDescription = stringResource(R.string.cd_clear_pinned_skill),
+                  tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                  modifier = Modifier.size(15.dp),
                 )
               }
             }
@@ -399,6 +444,91 @@ fun ChatInputBar(
                   imageVector = Icons.Rounded.ArrowUpward,
                   contentDescription = stringResource(R.string.cd_send_message),
                   modifier = Modifier.size(22.dp),
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+    }
+  }
+}
+
+@Composable
+private fun SlashCommandPopup(
+  suggestions: List<SlashCommandSuggestion>,
+  onSelect: (SlashCommandSuggestion) -> Unit,
+) {
+  Surface(
+    shape = RoundedCornerShape(18.dp),
+    color = MaterialTheme.colorScheme.surface,
+    tonalElevation = 6.dp,
+    shadowElevation = 8.dp,
+    modifier = Modifier.fillMaxWidth().testTag("slash_command_popup"),
+  ) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+      suggestions.take(6).forEachIndexed { index, suggestion ->
+        if (index > 0) {
+          HorizontalDivider(
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+            modifier = Modifier.padding(horizontal = 14.dp),
+          )
+        }
+        Surface(
+          onClick = { onSelect(suggestion) },
+          color = MaterialTheme.colorScheme.surface,
+          modifier =
+            Modifier.fillMaxWidth()
+              .heightIn(min = 48.dp)
+              .testTag("slash_command_item_${suggestion.slug}"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Outlined.AutoAwesome,
+              contentDescription = null,
+              tint =
+                if (suggestion.isBuiltIn) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier = Modifier.size(18.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                Text(
+                  text = suggestion.command,
+                  style = MaterialTheme.typography.labelLarge,
+                  color = MaterialTheme.colorScheme.onSurface,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+                if (suggestion.isBuiltIn) {
+                  Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                  ) {
+                    Text(
+                      text = stringResource(R.string.chat_slash_built_in),
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onPrimaryContainer,
+                      modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                  }
+                }
+              }
+              if (suggestion.skill.description.isNotBlank()) {
+                Text(
+                  text = suggestion.skill.description,
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 2,
+                  overflow = TextOverflow.Ellipsis,
                 )
               }
             }

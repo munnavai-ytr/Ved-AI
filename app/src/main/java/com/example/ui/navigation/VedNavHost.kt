@@ -91,6 +91,11 @@ fun VedNavHost(
             launchSingleTop = true
           }
         },
+        onOpenSkillEditor = { skillId ->
+          navController.navigate(SkillEditorRoute(skillId = skillId, isImportedDraft = false)) {
+            launchSingleTop = true
+          }
+        },
       )
     }
 

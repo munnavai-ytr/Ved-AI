@@ -62,11 +62,15 @@ import com.example.data.util.AttachmentProcessor
 import com.example.data.util.AttachmentTypes
 import com.example.data.util.MemoryPromptHelper
 import com.example.data.util.PendingAttachment
+import com.example.data.util.SkillCreateParseResult
+import com.example.data.util.SkillCreatorHelper
 import com.example.data.util.SkillMatcher
 import com.example.data.util.SpeechAndTtsUtils
 import com.example.service.VedNotifications
 import com.example.ui.screens.MemoryScreen
+import com.example.ui.screens.SkillsScreen
 import com.example.ui.viewmodel.MemoryViewModel
+import com.example.ui.viewmodel.SkillsViewModel
 import java.io.File
 import java.io.RandomAccessFile
 import kotlinx.serialization.json.Json
@@ -1891,5 +1895,248 @@ class ExampleRobolectricTest {
       composeTestRule.waitForIdle()
       composeTestRule.onNodeWithTag("show_suggested_replies_switch").assertIsDisplayed().performClick()
       assertEquals(false, toggledTo)
+    }
+
+  @Test
+  fun `skill creator is seeded protected from delete parses slash commands and extracts created skill`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val db =
+        Room.inMemoryDatabaseBuilder(context, VedDatabase::class.java)
+          .addCallback(VedDatabase.SEED_SYSTEM_SKILLS_CALLBACK)
+          .build()
+      try {
+        val fakeRetrofit =
+          Retrofit.Builder().baseUrl("https://openrouter.ai/").client(OkHttpClient()).build()
+        val repo =
+          ChatRepository(
+            appContext = context,
+            chatDao = db.chatDao(),
+            memoryDao = db.memoryDao(),
+            skillDao = db.skillDao(),
+            streamingClient = StreamingAiClient(OkHttpClient()),
+            geminiApi = fakeRetrofit.create(GeminiApiService::class.java),
+            openRouterApi = fakeRetrofit.create(OpenRouterApiService::class.java),
+            apiKeyStore = ApiKeyStore(context),
+            preferencesRepository = UserPreferencesRepository(context),
+          )
+
+        val initialSkills = repo.observeSkills().first()
+        val creator = initialSkills.firstOrNull { it.id == SkillEntity.SYSTEM_SKILL_CREATOR_ID }
+        assertTrue(creator != null)
+        assertEquals(SkillEntity.SOURCE_SYSTEM, creator!!.source)
+        assertTrue(creator.isEnabled)
+        assertEquals("Skill Creator", creator.name)
+
+        // System skill cannot be deleted via DAO or repository
+        repo.deleteSkill(SkillEntity.SYSTEM_SKILL_CREATOR_ID)
+        db.skillDao().deleteSkillById(SkillEntity.SYSTEM_SKILL_CREATOR_ID)
+        assertTrue(repo.getSkillWithFiles(SkillEntity.SYSTEM_SKILL_CREATOR_ID) != null)
+
+        // Slash suggestions always put /skill-creator first even with 0 custom skills
+        val onlyCreatorSuggestions =
+          SkillCreatorHelper.findSlashCommandSuggestions("/", listOf(creator))
+        assertEquals(1, onlyCreatorSuggestions.size)
+        assertEquals("/skill-creator", onlyCreatorSuggestions.first().command)
+        assertTrue(onlyCreatorSuggestions.first().isBuiltIn)
+
+        val customSkill =
+          SkillEntity(
+            id = "sk-custom",
+            name = "Kotlin Reviewer",
+            description = "Use when reviewing Kotlin code.",
+            skillMarkdown = "Check null safety.",
+            isEnabled = true,
+            source = SkillEntity.SOURCE_USER,
+            createdAt = 10L,
+            updatedAt = 20L,
+          )
+        val filtered =
+          SkillCreatorHelper.findSlashCommandSuggestions("/skill", listOf(customSkill, creator))
+        assertEquals(listOf("/skill-creator"), filtered.map { it.command })
+
+        // Space dismisses slash autocomplete
+        assertTrue(
+          SkillCreatorHelper.findSlashCommandSuggestions("/skill-creator hello", listOf(creator))
+            .isEmpty()
+        )
+
+        // Leading slash parser strips command and keeps remaining prompt
+        val parsedDirect =
+          SkillCreatorHelper.parseLeadingSlashCommand(
+            "/skill-creator help me make a standup formatter",
+            listOf(creator, customSkill),
+          )
+        assertEquals(SkillEntity.SYSTEM_SKILL_CREATOR_ID, parsedDirect.matchedSkill?.id)
+        assertEquals("help me make a standup formatter", parsedDirect.strippedPrompt)
+
+        // Streaming tag stripper hides partial & complete blocks
+        val midStream = "Here is your skill!\n[SKILL_CREATE]\nname: Standup"
+        assertEquals("Here is your skill!", SkillCreatorHelper.stripStreamingSkillCreatorTags(midStream))
+
+        // Full [SKILL_CREATE] + [SKILL_FILE] parsing & DB creation
+        val aiOutput =
+          """
+          I've created your new skill!
+
+          [SKILL_CREATE]
+          name: Standup Formatter
+          description: Use when turning messy daily notes into a crisp team standup update.
+          ---
+          Format updates under Done, Today, and Blockers headings.
+          [/SKILL_CREATE]
+
+          [SKILL_FILE: template.md]
+          ### Done
+          - Item 1
+          [/SKILL_FILE]
+          """.trimIndent()
+
+        val parseResult = SkillCreatorHelper.extractAndStripSkillCreate(aiOutput)
+        assertTrue(parseResult is SkillCreateParseResult.Created)
+        val createdRes = parseResult as SkillCreateParseResult.Created
+        assertEquals("I've created your new skill!", createdRes.cleanText)
+        assertEquals("Standup Formatter", createdRes.name)
+        assertEquals(1, createdRes.files.size)
+        assertEquals("template.md", createdRes.files.first().first)
+
+        val persisted =
+          repo.createSkillFromConversation(
+            name = createdRes.name,
+            description = createdRes.description,
+            skillMarkdown = createdRes.skillMarkdown,
+            files = createdRes.files,
+          )
+        val loaded = repo.getSkillWithFiles(persisted.id)!!
+        assertEquals(SkillEntity.SOURCE_USER, loaded.skill.source)
+        assertTrue(loaded.skill.isEnabled)
+        assertEquals("template.md", loaded.files.first().fileName)
+
+        // Malformed tag still strips raw markup cleanly
+        val malformed =
+          SkillCreatorHelper.extractAndStripSkillCreate(
+            "Sorry, here it is:\n[SKILL_CREATE]\nname: Broken\n[/SKILL_CREATE]"
+          )
+        assertTrue(malformed is SkillCreateParseResult.Malformed)
+        assertEquals("Sorry, here it is:", (malformed as SkillCreateParseResult.Malformed).cleanText)
+      } finally {
+        db.close()
+      }
+    }
+
+  @Test
+  fun `chat input slash popup and created skill confirmation banner render and trigger callbacks`() {
+    val creator = SkillCreatorHelper.buildSystemSkillCreatorEntity()
+    val suggestions = SkillCreatorHelper.findSlashCommandSuggestions("/", listOf(creator))
+    var selectedCmd: String? = null
+    var openedSkillBannerCount = 0
+
+    val assistantMsg =
+      MessageEntity(
+        id = "a-created",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_ASSISTANT,
+        content = "Your skill is ready to use!",
+        modelId = "gemini-flash-latest",
+        createdAt = 2L,
+        activeSkillName = "Skill Creator",
+      )
+
+    composeTestRule.setContent {
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        androidx.compose.foundation.layout.Column {
+          ChatMessageItem(
+            message = assistantMsg,
+            displayContent = assistantMsg.content,
+            isStreaming = false,
+            isLastAssistantMessage = true,
+            onRegenerate = {},
+            createdSkillName = "Standup Formatter",
+            onOpenCreatedSkill = { openedSkillBannerCount++ },
+          )
+          ChatInputBar(
+            text = "/",
+            onTextChange = {},
+            isGenerating = false,
+            onSend = {},
+            onStop = {},
+            hasEnabledSkills = true,
+            pinnedSkill = creator,
+            slashSuggestions = suggestions,
+            onSlashCommandSelected = { selectedCmd = it.command },
+          )
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("created_skill_banner").assertIsDisplayed().performClick()
+    assertEquals(1, openedSkillBannerCount)
+    composeTestRule.onNodeWithTag("pinned_skill_chip").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Active: Skill Creator").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("slash_command_popup").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("slash_command_item_skill-creator").assertIsDisplayed().performClick()
+    assertEquals("/skill-creator", selectedCmd)
+  }
+
+  @Test
+  fun `skills screen shows non-deletable built-in section and slash creator discovery hint`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val db =
+        Room.inMemoryDatabaseBuilder(context, VedDatabase::class.java)
+          .addCallback(VedDatabase.SEED_SYSTEM_SKILLS_CALLBACK)
+          .build()
+      try {
+        val fakeRetrofit =
+          Retrofit.Builder().baseUrl("https://openrouter.ai/").client(OkHttpClient()).build()
+        val repo =
+          ChatRepository(
+            appContext = context,
+            chatDao = db.chatDao(),
+            memoryDao = db.memoryDao(),
+            skillDao = db.skillDao(),
+            streamingClient = StreamingAiClient(OkHttpClient()),
+            geminiApi = fakeRetrofit.create(GeminiApiService::class.java),
+            openRouterApi = fakeRetrofit.create(OpenRouterApiService::class.java),
+            apiKeyStore = ApiKeyStore(context),
+            preferencesRepository = UserPreferencesRepository(context),
+          )
+        val vm = SkillsViewModel(repo)
+
+        composeTestRule.setContent {
+          VedTheme(themeMode = ThemeMode.LIGHT) {
+            SkillsScreen(
+              viewModel = vm,
+              onNavigateBack = {},
+              onCreateSkill = {},
+              onEditSkill = {},
+              onOpenImportedDraft = {},
+            )
+          }
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000L) {
+          composeTestRule.onAllNodesWithText("Skill Creator").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.onNodeWithTag("skills_section_built_in").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("skill_card_${SkillEntity.SYSTEM_SKILL_CREATOR_ID}").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("skill_toggle_${SkillEntity.SYSTEM_SKILL_CREATOR_ID}").assertIsDisplayed()
+        assertTrue(
+          composeTestRule
+            .onAllNodes(hasTestTag("delete_skill_${SkillEntity.SYSTEM_SKILL_CREATOR_ID}"))
+            .fetchSemanticsNodes()
+            .isEmpty()
+        )
+        assertTrue(
+          composeTestRule
+            .onAllNodes(hasTestTag("export_skill_${SkillEntity.SYSTEM_SKILL_CREATOR_ID}"))
+            .fetchSemanticsNodes()
+            .isEmpty()
+        )
+        composeTestRule.onNodeWithTag("skills_custom_empty_hint").assertIsDisplayed()
+      } finally {
+        db.close()
+      }
     }
 }

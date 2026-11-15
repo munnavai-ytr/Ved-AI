@@ -17,8 +17,11 @@ import com.example.data.repository.DeletedConversationBackup
 import com.example.data.util.AttachmentPrepareResult
 import com.example.data.util.AttachmentTypes
 import com.example.data.util.PendingAttachment
+import com.example.data.util.SkillCreatorHelper
+import com.example.data.util.SlashCommandSuggestion
 import com.example.data.util.SpeechAndTtsUtils
 import com.example.service.AiGenerationCoordinator
+import com.example.service.CreatedSkillBannerState
 import com.example.service.GenerationMetaState
 import com.example.service.GenerationRequest
 import com.example.service.SuggestedRepliesState
@@ -67,6 +70,9 @@ data class ChatUiState(
   val pinnedSkillId: String? = null,
   val suggestedReplies: List<String> = emptyList(),
   val suggestedRepliesMessageId: String? = null,
+  val createdSkillId: String? = null,
+  val createdSkillName: String? = null,
+  val createdSkillMessageId: String? = null,
 ) {
   val pinnedSkill: SkillEntity?
     get() = pinnedSkillId?.let { id -> enabledSkills.firstOrNull { it.id == id } }
@@ -177,6 +183,31 @@ class ChatViewModel(
         initialValue = emptyList(),
       )
 
+  val slashSuggestions: StateFlow<List<SlashCommandSuggestion>> =
+    combine(_inputText, enabledSkillsFlow) { input, skills ->
+        SkillCreatorHelper.findSlashCommandSuggestions(input, skills)
+      }
+      .stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = emptyList(),
+      )
+
+  init {
+    viewModelScope.launch {
+      generationCoordinator.skillCreationError.collect { errorMsg ->
+        _events.tryEmit(ChatUiEvent.ShowMessage(errorMsg))
+      }
+    }
+    viewModelScope.launch {
+      generationCoordinator.createdSkillBanner.collect { banner ->
+        if (banner != null && _pinnedSkillId.value == SkillEntity.SYSTEM_SKILL_CREATOR_ID) {
+          _pinnedSkillId.value = null
+        }
+      }
+    }
+  }
+
   private val foldersFlow =
     repository
       .observeFolders()
@@ -192,9 +223,19 @@ class ChatViewModel(
       _editingMessageId,
       _pendingAttachments,
       _pinnedSkillId,
-      generationCoordinator.suggestedReplies,
-    ) { genMeta, editingId, attachments, pinnedSkillId, suggestedReplies ->
-      ComposerMeta(genMeta, editingId, attachments, pinnedSkillId, suggestedReplies)
+      combine(
+        generationCoordinator.suggestedReplies,
+        generationCoordinator.createdSkillBanner,
+      ) { suggested, createdBanner -> suggested to createdBanner },
+    ) { genMeta, editingId, attachments, pinnedSkillId, extras ->
+      ComposerMeta(
+        generationMeta = genMeta,
+        editingMessageId = editingId,
+        pendingAttachments = attachments,
+        pinnedSkillId = pinnedSkillId,
+        suggestedReplies = extras.first,
+        createdSkillBanner = extras.second,
+      )
     }
 
   private val engineMetaFlow =
@@ -247,6 +288,13 @@ class ChatViewModel(
           } else {
             null
           }
+        val createdBanner =
+          composer.createdSkillBanner?.takeIf { banner ->
+            !genMeta.isGenerating &&
+              activeId != null &&
+              banner.conversationId == activeId &&
+              messages.any { it.message.id == banner.messageId }
+          }
         ChatUiState(
           conversations = drawerConversations,
           folders = convLists.folders,
@@ -265,6 +313,9 @@ class ChatViewModel(
           pinnedSkillId = validPinnedSkillId,
           suggestedReplies = activeSuggested?.replies.orEmpty(),
           suggestedRepliesMessageId = activeSuggested?.messageId,
+          createdSkillId = createdBanner?.skillId,
+          createdSkillName = createdBanner?.skillName,
+          createdSkillMessageId = createdBanner?.messageId,
         )
       }
       .stateIn(
@@ -291,6 +342,15 @@ class ChatViewModel(
 
   fun setPinnedSkill(skillId: String?) {
     _pinnedSkillId.value = if (_pinnedSkillId.value == skillId) null else skillId
+  }
+
+  fun onSlashCommandSelected(suggestion: SlashCommandSuggestion) {
+    _pinnedSkillId.value = suggestion.skill.id
+    _inputText.value = ""
+  }
+
+  fun clearPinnedSkill() {
+    _pinnedSkillId.value = null
   }
 
   fun startEditingMessage(messageWithAttachments: MessageWithAttachments) {
@@ -365,6 +425,7 @@ class ChatViewModel(
       _pendingAttachments.value = emptyList()
       _inputText.value = ""
       generationCoordinator.clearSuggestedReplies()
+      generationCoordinator.clearCreatedSkillBanner()
     }
     _activeConversationId.value = conversationId
   }
@@ -374,6 +435,7 @@ class ChatViewModel(
       generationCoordinator.stopGeneration()
     }
     generationCoordinator.clearSuggestedReplies()
+    generationCoordinator.clearCreatedSkillBanner()
     _editingMessageId.value = null
     _pendingAttachments.value = emptyList()
     _inputText.value = ""
@@ -389,8 +451,25 @@ class ChatViewModel(
       return
     }
 
+    val parsedSlash = SkillCreatorHelper.parseLeadingSlashCommand(rawPrompt, enabledSkillsFlow.value)
+    if (parsedSlash.matchedSkill != null &&
+      parsedSlash.strippedPrompt.isEmpty() &&
+      attachmentsToSend.isEmpty()
+    ) {
+      _pinnedSkillId.value = parsedSlash.matchedSkill.id
+      if (overridePrompt == null) {
+        _inputText.value = ""
+      }
+      return
+    }
+
+    val messagePrompt =
+      if (parsedSlash.matchedSkill != null) parsedSlash.strippedPrompt else rawPrompt
     val pendingEditId = if (overridePrompt == null) _editingMessageId.value else null
-    val pinnedSkillId = _pinnedSkillId.value
+    val effectivePinnedSkillId = parsedSlash.matchedSkill?.id ?: _pinnedSkillId.value
+    if (parsedSlash.matchedSkill?.id == SkillEntity.SYSTEM_SKILL_CREATOR_ID) {
+      _pinnedSkillId.value = SkillEntity.SYSTEM_SKILL_CREATOR_ID
+    }
 
     viewModelScope.launch {
       val prefs = repository.getCurrentPreferences()
@@ -420,7 +499,7 @@ class ChatViewModel(
       }
 
       val titleSource =
-        rawPrompt.ifBlank {
+        messagePrompt.ifBlank {
           attachmentsToSend.firstOrNull()?.displayName ?: "Attachment question"
         }
 
@@ -430,8 +509,8 @@ class ChatViewModel(
           val skillDeferred =
             async(Dispatchers.IO) {
               repository.resolveSkillContext(
-                userPrompt = rawPrompt,
-                pinnedSkillId = pinnedSkillId,
+                userPrompt = messagePrompt,
+                pinnedSkillId = effectivePinnedSkillId,
               )
             }
           val dbPrepDeferred =
@@ -466,7 +545,7 @@ class ChatViewModel(
 
               repository.insertUserMessage(
                 conversationId = convId,
-                content = rawPrompt,
+                content = messagePrompt,
                 attachments = attachmentsToSend,
               )
               val withAttachments = repository.getMessagesWithAttachmentsSync(convId)
@@ -490,6 +569,7 @@ class ChatViewModel(
             skillsIndexBlock = skillContext.skillsIndexBlock,
             activeSkillBlock = skillContext.activeSkillBlock,
             activeSkillName = skillContext.activeSkillName,
+            activeSkillId = skillContext.activeSkillId,
             shouldAutoTitle = firstTurn,
             firstUserPrompt = titleSource,
             includeSuggestedReplies = prefs.showSuggestedReplies,
@@ -568,6 +648,7 @@ class ChatViewModel(
             skillsIndexBlock = skillContext.skillsIndexBlock,
             activeSkillBlock = skillContext.activeSkillBlock,
             activeSkillName = skillContext.activeSkillName,
+            activeSkillId = skillContext.activeSkillId,
             shouldAutoTitle = updatedHistory.count { it.role == MessageEntity.ROLE_USER } == 1,
             firstUserPrompt = firstPrompt,
             includeSuggestedReplies = prefs.showSuggestedReplies,
@@ -688,6 +769,7 @@ class ChatViewModel(
     val pendingAttachments: List<PendingAttachment>,
     val pinnedSkillId: String?,
     val suggestedReplies: SuggestedRepliesState,
+    val createdSkillBanner: CreatedSkillBannerState?,
   )
 
   private data class EngineMeta(

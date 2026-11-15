@@ -129,11 +129,13 @@ private val SuggestedPrompts =
 fun ChatScreen(
   viewModel: ChatViewModel,
   onOpenSettings: () -> Unit,
+  onOpenSkillEditor: (String) -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val inputText by viewModel.inputText.collectAsStateWithLifecycle()
   val drawerSearchQuery by viewModel.drawerSearchQuery.collectAsStateWithLifecycle()
+  val slashSuggestions by viewModel.slashSuggestions.collectAsStateWithLifecycle()
 
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
   val snackbarHostState = remember { SnackbarHostState() }
@@ -722,6 +724,14 @@ fun ChatScreen(
                         null
                       }
                     }
+                  val createdSkillIdForItem =
+                    if (msg.id == uiState.createdSkillMessageId) uiState.createdSkillId else null
+                  val createdSkillNameForItem =
+                    if (msg.id == uiState.createdSkillMessageId) uiState.createdSkillName else null
+                  val onOpenCreatedSkillForItem: (() -> Unit)? =
+                    remember(createdSkillIdForItem, onOpenSkillEditor) {
+                      createdSkillIdForItem?.let { sid -> { onOpenSkillEditor(sid) } }
+                    }
                   ChatMessageItem(
                     message = msg,
                     attachments = item.attachments,
@@ -734,6 +744,8 @@ fun ChatScreen(
                     isSpeaking = speakingMessageId == msg.id,
                     onToggleSpeak = onToggleSpeak,
                     onBranchFromMessage = onBranch,
+                    createdSkillName = createdSkillNameForItem,
+                    onOpenCreatedSkill = onOpenCreatedSkillForItem,
                   )
                 }
               }
@@ -775,6 +787,9 @@ fun ChatScreen(
           hasEnabledSkills = uiState.enabledSkills.isNotEmpty(),
           pinnedSkill = uiState.pinnedSkill,
           onOpenSkillPicker = { showSkillPicker = true },
+          onClearPinnedSkill = viewModel::clearPinnedSkill,
+          slashSuggestions = slashSuggestions,
+          onSlashCommandSelected = viewModel::onSlashCommandSelected,
           isListening = isListening,
           onVoiceInputClick = onVoiceInputClick,
         )

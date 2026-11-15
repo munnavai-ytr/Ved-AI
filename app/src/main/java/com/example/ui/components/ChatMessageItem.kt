@@ -25,7 +25,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.MusicNote
@@ -116,6 +118,8 @@ fun ChatMessageItem(
   isSpeaking: Boolean = false,
   onToggleSpeak: (() -> Unit)? = null,
   onBranchFromMessage: (() -> Unit)? = null,
+  createdSkillName: String? = null,
+  onOpenCreatedSkill: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   if (message.role == MessageEntity.ROLE_USER) {
@@ -141,6 +145,8 @@ fun ChatMessageItem(
       isSpeaking = isSpeaking,
       onToggleSpeak = onToggleSpeak,
       onBranch = onBranchFromMessage,
+      createdSkillName = createdSkillName,
+      onOpenCreatedSkill = onOpenCreatedSkill,
       modifier = modifier,
     )
   }
@@ -346,6 +352,8 @@ private fun AssistantMessageBlock(
   isSpeaking: Boolean = false,
   onToggleSpeak: (() -> Unit)? = null,
   onBranch: (() -> Unit)? = null,
+  createdSkillName: String? = null,
+  onOpenCreatedSkill: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   val clipboard = LocalClipboardManager.current
@@ -538,6 +546,50 @@ private fun AssistantMessageBlock(
                 .padding(horizontal = 8.dp)
                 .testTag("message_token_count"),
           )
+        }
+      }
+    }
+
+    if (!isStreaming && !createdSkillName.isNullOrBlank()) {
+      Surface(
+        onClick = { onOpenCreatedSkill?.invoke() },
+        enabled = onOpenCreatedSkill != null,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("created_skill_banner"),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Outlined.AutoAwesome,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+          )
+          Text(
+            text = stringResource(R.string.chat_skill_created_banner, createdSkillName),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+          )
+          if (onOpenCreatedSkill != null) {
+            Text(
+              text = stringResource(R.string.chat_skill_created_tap_hint),
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.primary,
+            )
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+              modifier = Modifier.size(18.dp),
+            )
+          }
         }
       }
     }

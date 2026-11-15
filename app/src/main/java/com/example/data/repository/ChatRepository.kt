@@ -34,14 +34,17 @@ import com.example.data.util.AttachmentTypes
 import com.example.data.util.ImageProcessor
 import com.example.data.util.MemoryPromptHelper
 import com.example.data.util.PendingAttachment
+import com.example.data.util.SkillCreatorHelper
 import com.example.data.util.SkillMatcher
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
@@ -63,12 +66,13 @@ data class ImportBackupSummary(
 )
 
 /**
- * Resolved skill blocks and activated skill name for a single AI turn.
+ * Resolved skill blocks and activated skill metadata for a single AI turn.
  */
 data class ResolvedSkillContext(
   val skillsIndexBlock: String = "",
   val activeSkillBlock: String = "",
   val activeSkillName: String? = null,
+  val activeSkillId: String? = null,
 )
 
 /**
@@ -95,6 +99,7 @@ class ChatRepository(
 
   @Volatile private var cachedGeminiModels: List<AiModelInfo>? = null
   @Volatile private var cachedGeminiModelsKeyHash: Int = 0
+  private val systemSkillsSeeded = AtomicBoolean(false)
 
   val preferencesFlow: Flow<UserPreferences> = preferencesRepository.preferencesFlow
   val keyVersionFlow: StateFlow<Int> = apiKeyStore.keyVersion
@@ -282,13 +287,24 @@ class ChatRepository(
     return MemoryPromptHelper.formatMemoryContextBlock(memories)
   }
 
-  // --- Custom Skills ---
+  // --- Custom & Built-in Skills ---
 
-  fun observeSkills(): Flow<List<SkillEntity>> = skillDao.observeAllSkills()
+  suspend fun ensureSystemSkillsSeeded() {
+    if (systemSkillsSeeded.compareAndSet(false, true)) {
+      skillDao.insertSkillIgnoreConflict(SkillCreatorHelper.buildSystemSkillCreatorEntity())
+    }
+  }
 
-  fun observeSkillsWithFiles(): Flow<List<SkillWithFiles>> = skillDao.observeAllSkillsWithFiles()
+  fun observeSkills(): Flow<List<SkillEntity>> =
+    skillDao.observeAllSkills().onStart { ensureSystemSkillsSeeded() }
 
-  suspend fun getSkillWithFiles(skillId: String): SkillWithFiles? = skillDao.getSkillWithFiles(skillId)
+  fun observeSkillsWithFiles(): Flow<List<SkillWithFiles>> =
+    skillDao.observeAllSkillsWithFiles().onStart { ensureSystemSkillsSeeded() }
+
+  suspend fun getSkillWithFiles(skillId: String): SkillWithFiles? {
+    ensureSystemSkillsSeeded()
+    return skillDao.getSkillWithFiles(skillId)
+  }
 
   suspend fun saveSkill(
     id: String? = null,
@@ -301,6 +317,9 @@ class ChatRepository(
   ): SkillEntity {
     val now = System.currentTimeMillis()
     val existing = id?.let { skillDao.getSkillWithFiles(it)?.skill }
+    if (existing?.source == SkillEntity.SOURCE_SYSTEM) {
+      return existing
+    }
     val skillId = existing?.id ?: (id ?: UUID.randomUUID().toString())
     val entity =
       SkillEntity(
@@ -318,11 +337,47 @@ class ChatRepository(
     return entity
   }
 
+  suspend fun createSkillFromConversation(
+    name: String,
+    description: String,
+    skillMarkdown: String,
+    files: List<Pair<String, String>> = emptyList(),
+  ): SkillEntity {
+    val skillId = UUID.randomUUID().toString()
+    val fileEntities =
+      files.mapNotNull { (fileName, content) ->
+        val cleanName = fileName.trim()
+        val cleanContent = content.trim()
+        if (cleanName.isNotEmpty() && cleanContent.isNotEmpty()) {
+          SkillFileEntity(
+            id = UUID.randomUUID().toString(),
+            skillId = skillId,
+            fileName = cleanName,
+            content = cleanContent,
+          )
+        } else {
+          null
+        }
+      }
+    return saveSkill(
+      id = skillId,
+      name = name,
+      description = description,
+      skillMarkdown = skillMarkdown,
+      source = SkillEntity.SOURCE_USER,
+      isEnabled = true,
+      files = fileEntities,
+    )
+  }
+
   suspend fun setSkillEnabled(skillId: String, enabled: Boolean) {
+    ensureSystemSkillsSeeded()
     skillDao.setSkillEnabled(skillId, enabled, System.currentTimeMillis())
   }
 
   suspend fun deleteSkill(skillId: String) {
+    val existing = skillDao.getSkillWithFiles(skillId)?.skill
+    if (existing?.source == SkillEntity.SOURCE_SYSTEM) return
     skillDao.deleteSkillById(skillId)
   }
 
@@ -330,6 +385,7 @@ class ChatRepository(
     userPrompt: String,
     pinnedSkillId: String? = null,
   ): ResolvedSkillContext {
+    ensureSystemSkillsSeeded()
     val enabledSkills = skillDao.getAllEnabledSkillsSync()
     if (enabledSkills.isEmpty() && pinnedSkillId == null) {
       return ResolvedSkillContext()
@@ -351,6 +407,7 @@ class ChatRepository(
         skillsIndexBlock = indexBlock,
         activeSkillBlock = SkillMatcher.formatActiveSkillBlock(matchedSkill),
         activeSkillName = matchedSkill.skill.name,
+        activeSkillId = matchedSkill.skill.id,
       )
     } else {
       ResolvedSkillContext(skillsIndexBlock = indexBlock)

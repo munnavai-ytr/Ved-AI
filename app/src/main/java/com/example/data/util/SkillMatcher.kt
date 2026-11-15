@@ -205,6 +205,14 @@ object SkillMatcher {
     var bestScore = 0
 
     for (skill in enabledSkills) {
+      if (
+        skill.id == SkillEntity.SYSTEM_SKILL_CREATOR_ID &&
+          !normalizedPrompt.contains("skill-creator") &&
+          "skill" !in promptTokens &&
+          "skills" !in promptTokens
+      ) {
+        continue
+      }
       val nameLower = skill.name.lowercase().trim()
       val nameTokens = tokenize(nameLower)
       val descTokens = tokenize(skill.description)

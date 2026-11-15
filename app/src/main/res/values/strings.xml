@@ -72,6 +72,11 @@
     <string name="chat_attachment_video_badge">VIDEO</string>
     <string name="model_fast_badge">Fast</string>
     <string name="chat_skill_pill">Skill: %1$s</string>
+    <string name="chat_skill_creator_active_pill">Active: Skill Creator</string>
+    <string name="cd_clear_pinned_skill">Clear active skill</string>
+    <string name="chat_slash_built_in">Built-in</string>
+    <string name="chat_skill_created_banner">✓ Skill \u2018%1$s\u2019 created</string>
+    <string name="chat_skill_created_tap_hint">View &amp; edit</string>
     <string name="chat_skill_auto">Auto skill</string>
     <string name="chat_skill_picker_title">Pin a skill</string>
     <string name="chat_skill_picker_auto_desc">Automatically match based on your message</string>
@@ -182,8 +187,12 @@
     <string name="skills_import_button">Import skill</string>
     <string name="skills_empty_title">No skills yet</string>
     <string name="skills_empty_body">Create reusable instruction playbooks or import a Claude-style SKILL.md file so Ved automatically loads the right expertise when needed.</string>
-    <string name="skills_source_user">User</string>
+    <string name="skills_section_built_in">Built-in</string>
+    <string name="skills_section_custom">Your skills</string>
+    <string name="skills_source_built_in">Built-in</string>
+    <string name="skills_source_user">Created</string>
     <string name="skills_source_imported">Imported</string>
+    <string name="skills_custom_empty_hint">No custom skills yet. Try typing /skill-creator in a chat to build one by just describing what you want.</string>
     <string name="skills_files_count">%1$d ref files</string>
     <string name="skills_editor_create_title">Create skill</string>
     <string name="skills_editor_edit_title">Edit skill</string>
