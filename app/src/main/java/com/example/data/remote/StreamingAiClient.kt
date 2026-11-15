@@ -50,12 +50,6 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     val job =
       launch(Dispatchers.IO) {
         try {
-          val combinedSystemInstruction =
-            MemoryPromptHelper.buildCombinedSystemInstruction(
-              customSystemPrompt = systemPrompt,
-              memoryContextBlock = memoryContext,
-            )
-
           val request =
             when (provider) {
               AiProvider.GEMINI ->
@@ -64,7 +58,9 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                   apiKey = apiKey,
                   history = history,
                   stream = true,
-                  systemPrompt = combinedSystemInstruction,
+                  systemPrompt = systemPrompt,
+                  memoryContext = memoryContext,
+                  includeAccuracyAndMemory = true,
                   imageBase64ByUri = imageBase64ByUri,
                 )
               AiProvider.OPENROUTER ->
@@ -73,7 +69,9 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                   apiKey = apiKey,
                   history = history,
                   stream = true,
-                  systemPrompt = combinedSystemInstruction,
+                  systemPrompt = systemPrompt,
+                  memoryContext = memoryContext,
+                  includeAccuracyAndMemory = true,
                 )
             }
 
@@ -197,6 +195,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
               history = syntheticHistory,
               stream = false,
               systemPrompt = systemPrompt,
+              includeAccuracyAndMemory = false,
             )
           AiProvider.OPENROUTER ->
             buildOpenRouterRequest(
@@ -205,6 +204,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
               history = syntheticHistory,
               stream = false,
               systemPrompt = systemPrompt,
+              includeAccuracyAndMemory = false,
             )
         }
 
@@ -235,12 +235,14 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
         .getOrNull()
     }
 
-  private fun buildGeminiRequest(
+  internal fun buildGeminiRequest(
     modelId: String,
     apiKey: String,
     history: List<MessageEntity>,
     stream: Boolean,
     systemPrompt: String = "",
+    memoryContext: String = "",
+    includeAccuracyAndMemory: Boolean = true,
     imageBase64ByUri: Map<String, String> = emptyMap(),
   ): Request {
     val action = if (stream) "streamGenerateContent?alt=sse" else "generateContent"
@@ -270,11 +272,16 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     }
 
     val payload = JSONObject().put("contents", contentsArray)
-    val trimmedSystemPrompt = systemPrompt.trim()
-    if (trimmedSystemPrompt.isNotEmpty()) {
+    val finalSystemInstruction =
+      resolveSystemInstruction(
+        customSystemPrompt = systemPrompt,
+        memoryContext = memoryContext,
+        includeAccuracyAndMemory = includeAccuracyAndMemory,
+      )
+    if (finalSystemInstruction.isNotEmpty()) {
       payload.put(
         "systemInstruction",
-        JSONObject().put("parts", JSONArray().put(JSONObject().put("text", trimmedSystemPrompt))),
+        JSONObject().put("parts", JSONArray().put(JSONObject().put("text", finalSystemInstruction))),
       )
     }
 
@@ -288,17 +295,24 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       .build()
   }
 
-  private fun buildOpenRouterRequest(
+  internal fun buildOpenRouterRequest(
     modelId: String,
     apiKey: String,
     history: List<MessageEntity>,
     stream: Boolean,
     systemPrompt: String = "",
+    memoryContext: String = "",
+    includeAccuracyAndMemory: Boolean = true,
   ): Request {
     val messagesArray = JSONArray()
-    val trimmedSystemPrompt = systemPrompt.trim()
-    if (trimmedSystemPrompt.isNotEmpty()) {
-      messagesArray.put(JSONObject().put("role", "system").put("content", trimmedSystemPrompt))
+    val finalSystemInstruction =
+      resolveSystemInstruction(
+        customSystemPrompt = systemPrompt,
+        memoryContext = memoryContext,
+        includeAccuracyAndMemory = includeAccuracyAndMemory,
+      )
+    if (finalSystemInstruction.isNotEmpty()) {
+      messagesArray.put(JSONObject().put("role", "system").put("content", finalSystemInstruction))
     }
 
     for (msg in history) {
@@ -322,6 +336,22 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       .addHeader("X-Title", "Ved")
       .post(body)
       .build()
+  }
+
+  private fun resolveSystemInstruction(
+    customSystemPrompt: String,
+    memoryContext: String,
+    includeAccuracyAndMemory: Boolean,
+  ): String {
+    return if (includeAccuracyAndMemory) {
+      MemoryPromptHelper.buildCombinedSystemInstruction(
+        customSystemPrompt = customSystemPrompt,
+        memoryContextBlock = memoryContext,
+        leadingInstruction = ACCURACY_SYSTEM_INSTRUCTION,
+      )
+    } else {
+      customSystemPrompt.trim()
+    }
   }
 
   private data class ParsedSse(
@@ -426,5 +456,20 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
   private companion object {
     val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     val WHITESPACE_REGEX = Regex("\\s+")
+
+    // Note: Actual model behavior ultimately depends on which underlying model is selected
+    // (e.g., Gemini vs. an OpenRouter-routed Claude or GPT model). This baseline instruction
+    // improves honesty and calibration across providers, but cannot guarantee zero hallucination
+    // because hallucination resistance is an inherent property of the underlying model itself,
+    // not something any system prompt can fully control.
+    private const val ACCURACY_SYSTEM_INSTRUCTION =
+      "Follow these standards for every response:\n" +
+        "1. If you are not confident about a fact, number, date, name, or claim, say so explicitly rather than presenting it as certain. Use phrases like \"I'm not certain, but...\" or \"I don't have reliable information on this\" instead of guessing confidently.\n" +
+        "2. Never invent sources, statistics, citations, URLs, or specific numbers you cannot verify. If asked for a source and you don't have one, say you don't have one rather than fabricating one.\n" +
+        "3. Distinguish clearly between what is well-established fact, what is your best inference, and what is genuinely uncertain or disputed.\n" +
+        "4. If a question depends on information that may have changed after your training data, or requires real-time data you don't have access to, say so plainly instead of answering as if you have current information.\n" +
+        "5. If a request is ambiguous, ask a clarifying question rather than assuming and answering confidently based on a guess.\n" +
+        "6. Prioritize correctness over sounding impressive. A short, honest \"I don't know\" or \"I'm not sure\" is always better than a confident wrong answer.\n" +
+        "7. When giving code, technical steps, or instructions, double check logical consistency before presenting it as final — do not present untested assumptions as verified facts."
   }
 }

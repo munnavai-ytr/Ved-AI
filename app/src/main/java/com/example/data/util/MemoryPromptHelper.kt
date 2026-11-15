@@ -33,8 +33,13 @@ object MemoryPromptHelper {
   fun buildCombinedSystemInstruction(
     customSystemPrompt: String,
     memoryContextBlock: String,
+    leadingInstruction: String = "",
   ): String {
     val parts = buildList {
+      val trimmedLeading = leadingInstruction.trim()
+      if (trimmedLeading.isNotEmpty()) {
+        add(trimmedLeading)
+      }
       val trimmedCustom = customSystemPrompt.trim()
       if (trimmedCustom.isNotEmpty()) {
         add(trimmedCustom)

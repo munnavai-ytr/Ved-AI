@@ -39,6 +39,8 @@ import com.example.ui.screens.MemoryScreen
 import com.example.ui.viewmodel.MemoryViewModel
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
+import okio.Buffer
+import org.json.JSONObject
 import retrofit2.Retrofit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -560,6 +562,92 @@ class ExampleRobolectricTest {
     } finally {
       db.close()
     }
+  }
+
+  @Test
+  fun `streaming client prepends accuracy instruction before custom prompt and memory for chat but skips it for titles`() {
+    val client = StreamingAiClient(OkHttpClient())
+    val history =
+      listOf(
+        MessageEntity(
+          id = "u1",
+          conversationId = "c1",
+          role = MessageEntity.ROLE_USER,
+          content = "What is the population of Mars?",
+          createdAt = 1L,
+        )
+      )
+    val customPrompt = "Respond in concise bullet points."
+    val memoryBlock = "## What you remember about this user (long-term memory):\n- [profile] Name is M"
+
+    // 1. Gemini chat request includes Accuracy -> Custom -> Memory in exact order
+    val geminiReq =
+      client.buildGeminiRequest(
+        modelId = "gemini-2.5-flash",
+        apiKey = "test-key",
+        history = history,
+        stream = true,
+        systemPrompt = customPrompt,
+        memoryContext = memoryBlock,
+        includeAccuracyAndMemory = true,
+      )
+    val geminiBody = Buffer().also { geminiReq.body!!.writeTo(it) }.readUtf8()
+    val geminiSystem =
+      JSONObject(geminiBody)
+        .getJSONObject("systemInstruction")
+        .getJSONArray("parts")
+        .getJSONObject(0)
+        .getString("text")
+
+    assertTrue(geminiSystem.startsWith("Follow these standards for every response:"))
+    assertTrue(geminiSystem.contains("7. When giving code, technical steps, or instructions"))
+    val accIdx = geminiSystem.indexOf("Follow these standards for every response:")
+    val customIdx = geminiSystem.indexOf(customPrompt)
+    val memIdx = geminiSystem.indexOf(memoryBlock)
+    assertTrue(accIdx == 0 && accIdx < customIdx && customIdx < memIdx)
+
+    // 2. OpenRouter chat request includes Accuracy -> Custom -> Memory in exact order
+    val orReq =
+      client.buildOpenRouterRequest(
+        modelId = "openai/gpt-4o",
+        apiKey = "test-key",
+        history = history,
+        stream = true,
+        systemPrompt = customPrompt,
+        memoryContext = memoryBlock,
+        includeAccuracyAndMemory = true,
+      )
+    val orBody = Buffer().also { orReq.body!!.writeTo(it) }.readUtf8()
+    val orFirstMsg = JSONObject(orBody).getJSONArray("messages").getJSONObject(0)
+    assertEquals("system", orFirstMsg.getString("role"))
+    val orSystem = orFirstMsg.getString("content")
+    assertEquals(geminiSystem, orSystem)
+
+    // 3. Title generation mode excludes accuracy & memory instructions
+    val geminiTitleReq =
+      client.buildGeminiRequest(
+        modelId = "gemini-2.5-flash",
+        apiKey = "test-key",
+        history = history,
+        stream = false,
+        systemPrompt = "",
+        includeAccuracyAndMemory = false,
+      )
+    val geminiTitleJson = JSONObject(Buffer().also { geminiTitleReq.body!!.writeTo(it) }.readUtf8())
+    assertTrue(!geminiTitleJson.has("systemInstruction"))
+
+    val orTitleReq =
+      client.buildOpenRouterRequest(
+        modelId = "openai/gpt-4o",
+        apiKey = "test-key",
+        history = history,
+        stream = false,
+        systemPrompt = "",
+        includeAccuracyAndMemory = false,
+      )
+    val orTitleMessages =
+      JSONObject(Buffer().also { orTitleReq.body!!.writeTo(it) }.readUtf8()).getJSONArray("messages")
+    assertEquals("user", orTitleMessages.getJSONObject(0).getString("role"))
   }
 
   @Test
