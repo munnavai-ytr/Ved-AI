@@ -1,11 +1,17 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -84,6 +90,7 @@ fun StreamingChatMessageItem(
   message: MessageEntity,
   attachments: List<MessageAttachmentEntity> = emptyList(),
   streamingTextFlow: StateFlow<String>,
+  thinkingStatusText: String? = null,
   isLastAssistantMessage: Boolean,
   onRegenerate: () -> Unit,
   modifier: Modifier = Modifier,
@@ -94,6 +101,7 @@ fun StreamingChatMessageItem(
     attachments = attachments,
     displayContent = streamedText,
     isStreaming = true,
+    thinkingStatusText = thinkingStatusText,
     isLastAssistantMessage = isLastAssistantMessage,
     onRegenerate = onRegenerate,
     modifier = modifier,
@@ -113,6 +121,7 @@ fun ChatMessageItem(
   isStreaming: Boolean,
   isLastAssistantMessage: Boolean,
   onRegenerate: () -> Unit,
+  thinkingStatusText: String? = null,
   canEdit: Boolean = true,
   onEditMessage: (() -> Unit)? = null,
   isSpeaking: Boolean = false,
@@ -139,6 +148,7 @@ fun ChatMessageItem(
       activeSkillName = message.activeSkillName,
       isError = message.isError,
       isStreaming = isStreaming,
+      thinkingStatusText = thinkingStatusText,
       canRegenerate = isLastAssistantMessage && !isStreaming,
       completionTokens = message.completionTokens,
       onRegenerate = onRegenerate,
@@ -346,6 +356,7 @@ private fun AssistantMessageBlock(
   activeSkillName: String?,
   isError: Boolean,
   isStreaming: Boolean,
+  thinkingStatusText: String? = null,
   canRegenerate: Boolean,
   completionTokens: Int?,
   onRegenerate: () -> Unit,
@@ -416,7 +427,10 @@ private fun AssistantMessageBlock(
 
     // Body
     if (content.isBlank() && isStreaming) {
-      ThinkingIndicator(modifier = Modifier.padding(vertical = 2.dp))
+      ThinkingIndicator(
+        thinkingStatusText = thinkingStatusText,
+        modifier = Modifier.padding(vertical = 2.dp),
+      )
     } else if (isError) {
       Surface(
         shape = RoundedCornerShape(16.dp),
@@ -597,20 +611,45 @@ private fun AssistantMessageBlock(
 }
 
 @Composable
-private fun ThinkingIndicator(modifier: Modifier = Modifier) {
+private fun ThinkingIndicator(
+  thinkingStatusText: String? = null,
+  modifier: Modifier = Modifier,
+) {
   val transition = rememberInfiniteTransition(label = "thinking_dots")
   val dotColor = MaterialTheme.colorScheme.onSurfaceVariant
+  val liveStatus = thinkingStatusText?.takeIf { it.isNotBlank() }
 
   Row(
     modifier = modifier.testTag("thinking_indicator"),
     verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    Text(
-      text = stringResource(R.string.chat_thinking),
-      style = MaterialTheme.typography.bodyMedium,
-      color = dotColor,
-    )
+    if (liveStatus != null) {
+      AnimatedContent(
+        targetState = liveStatus,
+        transitionSpec = {
+          (fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 3 }) togetherWith
+            (fadeOut(tween(140)) + slideOutVertically(tween(140)) { -it / 3 })
+        },
+        label = "thinking_live_status",
+        modifier = Modifier.weight(1f, fill = false),
+      ) { statusLabel ->
+        Text(
+          text = statusLabel,
+          style = MaterialTheme.typography.bodyMedium,
+          color = dotColor,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.testTag("thinking_live_status_text"),
+        )
+      }
+    } else {
+      Text(
+        text = stringResource(R.string.chat_thinking),
+        style = MaterialTheme.typography.bodyMedium,
+        color = dotColor,
+      )
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
       repeat(3) { index ->
         val alpha by

@@ -24,6 +24,8 @@ import org.json.JSONObject
  * Events emitted while streaming a chat completion from Gemini or OpenRouter.
  */
 sealed interface StreamChunk {
+  data class Thinking(val text: String) : StreamChunk
+
   data class Delta(val text: String) : StreamChunk
 
   data class Completed(
@@ -58,7 +60,10 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     val job =
       launch(Dispatchers.IO) {
         try {
-          val request =
+          val supportsThinkingAttempt =
+            provider == AiProvider.GEMINI && modelSupportsThinking(modelId)
+
+          fun createRequest(includeThinking: Boolean): Request =
             when (provider) {
               AiProvider.GEMINI ->
                 buildGeminiRequest(
@@ -71,6 +76,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                   skillsIndexBlock = skillsIndexBlock,
                   activeSkillBlock = activeSkillBlock,
                   includeAccuracyAndMemory = true,
+                  includeThinkingConfig = includeThinking,
                   imageBase64ByUri = imageBase64ByUri,
                   attachmentsByMessageId = attachmentsByMessageId,
                   binaryBase64ByPath = binaryBase64ByPath,
@@ -92,18 +98,33 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                 )
             }
 
-          val call = okHttpClient.newCall(request)
-          activeCall = call
+          var response =
+            okHttpClient.newCall(createRequest(supportsThinkingAttempt)).also { activeCall = it }.execute()
 
-          call.execute().use { response ->
-            if (!response.isSuccessful) {
-              val errorBody = response.body?.string().orEmpty()
-              trySend(StreamChunk.Error(parseApiError(response.code, errorBody, provider)))
+          if (!response.isSuccessful && supportsThinkingAttempt) {
+            val errorBody = response.body?.string().orEmpty()
+            val statusCode = response.code
+            if (isUnsupportedThinkingConfigError(statusCode, errorBody)) {
+              response.close()
+              response =
+                okHttpClient.newCall(createRequest(false)).also { activeCall = it }.execute()
+            } else {
+              response.close()
+              trySend(StreamChunk.Error(parseApiError(statusCode, errorBody, provider)))
+              close()
+              return@launch
+            }
+          }
+
+          response.use { activeResponse ->
+            if (!activeResponse.isSuccessful) {
+              val errorBody = activeResponse.body?.string().orEmpty()
+              trySend(StreamChunk.Error(parseApiError(activeResponse.code, errorBody, provider)))
               close()
               return@launch
             }
 
-            val source = response.body?.source()
+            val source = activeResponse.body?.source()
             if (source == null) {
               trySend(StreamChunk.Error("Empty response stream from ${provider.displayName}."))
               close()
@@ -139,7 +160,15 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                 if (parsed.completionTokens != null) {
                   latestCompletionTokens = parsed.completionTokens
                 }
-                if (!parsed.text.isNullOrEmpty()) {
+                if (parsed.parts.isNotEmpty()) {
+                  for (part in parsed.parts) {
+                    if (part.isThought) {
+                      trySend(StreamChunk.Thinking(part.text))
+                    } else {
+                      trySend(StreamChunk.Delta(part.text))
+                    }
+                  }
+                } else if (!parsed.text.isNullOrEmpty()) {
                   trySend(StreamChunk.Delta(parsed.text))
                 }
               }
@@ -360,6 +389,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     skillsIndexBlock: String = "",
     activeSkillBlock: String = "",
     includeAccuracyAndMemory: Boolean = true,
+    includeThinkingConfig: Boolean = stream && modelSupportsThinking(modelId),
     imageBase64ByUri: Map<String, String> = emptyMap(),
     attachmentsByMessageId: Map<String, List<MessageAttachmentEntity>> = emptyMap(),
     binaryBase64ByPath: Map<String, String> = emptyMap(),
@@ -437,6 +467,13 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       payload.put(
         "systemInstruction",
         JSONObject().put("parts", JSONArray().put(JSONObject().put("text", finalSystemInstruction))),
+      )
+    }
+
+    if (includeThinkingConfig) {
+      payload.put(
+        "generationConfig",
+        JSONObject().put("thinkingConfig", JSONObject().put("includeThoughts", true)),
       )
     }
 
@@ -553,14 +590,20 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     }
   }
 
-  private data class ParsedSse(
+  internal data class ParsedSsePart(
+    val text: String,
+    val isThought: Boolean,
+  )
+
+  internal data class ParsedSse(
+    val parts: List<ParsedSsePart> = emptyList(),
     val text: String? = null,
     val error: String? = null,
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
   )
 
-  private fun parseGeminiSsePayload(rawJson: String): ParsedSse {
+  internal fun parseGeminiSsePayload(rawJson: String): ParsedSse {
     return runCatching {
         val root = JSONObject(rawJson)
         root.optJSONObject("error")?.let { err ->
@@ -582,21 +625,27 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
             ?.optJSONObject("content")
             ?.optJSONArray("parts")
 
-        val text =
-          if (parts == null || parts.length() == 0) {
-            null
-          } else if (parts.length() == 1) {
-            parts.optJSONObject(0)?.optString("text", "")
-          } else {
-            val sb = StringBuilder()
-            for (i in 0 until parts.length()) {
-              sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
-            }
-            sb.toString()
+        if (parts == null || parts.length() == 0) {
+          return ParsedSse(promptTokens = promptTokens, completionTokens = completionTokens)
+        }
+
+        val parsedParts = ArrayList<ParsedSsePart>(parts.length())
+        val answerSb = StringBuilder()
+
+        for (i in 0 until parts.length()) {
+          val partObj = parts.optJSONObject(i) ?: continue
+          val partText = partObj.optString("text", "")
+          if (partText.isEmpty()) continue
+          val isThought = partObj.optBoolean("thought", false)
+          parsedParts.add(ParsedSsePart(text = partText, isThought = isThought))
+          if (!isThought) {
+            answerSb.append(partText)
           }
+        }
 
         ParsedSse(
-          text = text,
+          parts = parsedParts,
+          text = if (answerSb.isNotEmpty()) answerSb.toString() else null,
           promptTokens = promptTokens,
           completionTokens = completionTokens,
         )
@@ -652,10 +701,10 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     }
   }
 
-  private companion object {
-    val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-    val WHITESPACE_REGEX = Regex("\\s+")
-    val LIST_PREFIX_REGEX = Regex("^(?:[-*•]+|\\d+[.)])\\s*")
+  companion object {
+    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    private val WHITESPACE_REGEX = Regex("\\s+")
+    private val LIST_PREFIX_REGEX = Regex("^(?:[-*•]+|\\d+[.)])\\s*")
 
     // Note: Actual model behavior ultimately depends on which underlying model is selected
     // (e.g., Gemini vs. an OpenRouter-routed Claude or GPT model). This baseline instruction
@@ -671,5 +720,40 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
         "5. If a request is ambiguous, ask a clarifying question rather than assuming and answering confidently based on a guess.\n" +
         "6. Prioritize correctness over sounding impressive. A short, honest \"I don't know\" or \"I'm not sure\" is always better than a confident wrong answer.\n" +
         "7. When giving code, technical steps, or instructions, double check logical consistency before presenting it as final — do not present untested assumptions as verified facts."
+
+    fun modelSupportsThinking(modelId: String): Boolean {
+      val lower = modelId.trim().lowercase()
+      if (lower.isEmpty()) return false
+      if (lower.contains("thinking")) return true
+      if (lower.contains("gemini-2.5") || lower.contains("gemini-3") || lower.contains("gemini-4")) {
+        return true
+      }
+      if (lower == "gemini-flash-latest" || lower == "gemini-pro-latest") {
+        return true
+      }
+      if (
+        lower.startsWith("gemini-1.") ||
+          (lower.startsWith("gemini-pro") && !lower.contains("latest")) ||
+          (lower.startsWith("gemini-2.0") && !lower.contains("thinking"))
+      ) {
+        return false
+      }
+      return lower.contains("gemini")
+    }
+
+    internal fun isUnsupportedThinkingConfigError(statusCode: Int, errorBody: String): Boolean {
+      if (statusCode != 400 && statusCode != 404 && statusCode != 422) return false
+      val lower = errorBody.lowercase()
+      return lower.contains("thinkingconfig") ||
+        lower.contains("thinking_config") ||
+        lower.contains("includethoughts") ||
+        lower.contains("include_thoughts") ||
+        (lower.contains("thinking") &&
+          (lower.contains("not supported") ||
+            lower.contains("unsupported") ||
+            lower.contains("not enabled") ||
+            lower.contains("unknown name") ||
+            lower.contains("invalid argument")))
+    }
   }
 }

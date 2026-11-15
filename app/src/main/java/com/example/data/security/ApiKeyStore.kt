@@ -25,7 +25,7 @@ enum class KeySource {
  * Manages optional local API key overrides encrypted via Android Keystore /
  * EncryptedSharedPreferences, falling back to build-time BuildConfig secrets.
  */
-class ApiKeyStore(private val context: Context) {
+open class ApiKeyStore(private val context: Context) {
 
   private val prefsLock = Any()
   @Volatile private var cachedPrefs: SharedPreferences? = null
@@ -49,7 +49,7 @@ class ApiKeyStore(private val context: Context) {
     }
   }
 
-  suspend fun getEffectiveKey(provider: AiProvider): String =
+  open suspend fun getEffectiveKey(provider: AiProvider): String =
     withContext(Dispatchers.IO) {
       val override = getEncryptedPrefs().getString(prefKeyFor(provider), null)?.trim().orEmpty()
       if (override.isNotEmpty()) {

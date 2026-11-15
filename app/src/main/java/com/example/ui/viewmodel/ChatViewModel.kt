@@ -60,6 +60,7 @@ data class ChatUiState(
   val branchedFromTitle: String? = null,
   val messages: List<MessageWithAttachments> = emptyList(),
   val streamingMessageId: String? = null,
+  val thinkingStatusText: String? = null,
   val isGenerating: Boolean = false,
   val activeProvider: AiProvider = AiProvider.GEMINI,
   val activeModelId: String = FallbackGeminiModels.first().id,
@@ -219,7 +220,11 @@ class ChatViewModel(
 
   private val composerMetaFlow =
     combine(
-      generationCoordinator.generationMeta,
+      combine(generationCoordinator.generationMeta, generationCoordinator.thinkingStatus) {
+        meta,
+        thinkingStatus ->
+        meta to thinkingStatus
+      },
       _editingMessageId,
       _pendingAttachments,
       _pinnedSkillId,
@@ -227,9 +232,10 @@ class ChatViewModel(
         generationCoordinator.suggestedReplies,
         generationCoordinator.createdSkillBanner,
       ) { suggested, createdBanner -> suggested to createdBanner },
-    ) { genMeta, editingId, attachments, pinnedSkillId, extras ->
+    ) { genPair, editingId, attachments, pinnedSkillId, extras ->
       ComposerMeta(
-        generationMeta = genMeta,
+        generationMeta = genPair.first,
+        thinkingStatusText = genPair.second,
         editingMessageId = editingId,
         pendingAttachments = attachments,
         pinnedSkillId = pinnedSkillId,
@@ -272,6 +278,12 @@ class ChatViewModel(
           } else {
             null
           }
+        val activeThinkingStatus =
+          if (genMeta.isGenerating && genMeta.conversationId == activeId) {
+            composer.thinkingStatusText
+          } else {
+            null
+          }
         val showSuggested = engineMeta.prefs.showSuggestedReplies
         val suggestedState = composer.suggestedReplies
         val lastMessageId = messages.lastOrNull()?.message?.id
@@ -303,6 +315,7 @@ class ChatViewModel(
           branchedFromTitle = branchedFromTitle,
           messages = messages,
           streamingMessageId = activeStreamingId,
+          thinkingStatusText = activeThinkingStatus,
           isGenerating = genMeta.isGenerating,
           activeProvider = engineMeta.prefs.activeProvider,
           activeModelId = engineMeta.prefs.activeModelId,
@@ -765,6 +778,7 @@ class ChatViewModel(
 
   private data class ComposerMeta(
     val generationMeta: GenerationMetaState,
+    val thinkingStatusText: String?,
     val editingMessageId: String?,
     val pendingAttachments: List<PendingAttachment>,
     val pinnedSkillId: String?,

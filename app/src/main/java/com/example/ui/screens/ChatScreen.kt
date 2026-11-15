@@ -693,6 +693,7 @@ fun ChatScreen(
                     message = msg,
                     attachments = item.attachments,
                     streamingTextFlow = viewModel.streamingText,
+                    thinkingStatusText = uiState.thinkingStatusText,
                     isLastAssistantMessage = index == lastAssistantIndex,
                     onRegenerate = onRegenerate,
                   )

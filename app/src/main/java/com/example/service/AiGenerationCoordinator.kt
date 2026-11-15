@@ -15,6 +15,7 @@ import com.example.data.util.ExtractedMemory
 import com.example.data.util.MemoryPromptHelper
 import com.example.data.util.SkillCreateParseResult
 import com.example.data.util.SkillCreatorHelper
+import com.example.data.util.ThinkingStatusFormatter
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +73,8 @@ data class GenerationRequest(
 )
 
 private sealed interface ThrottledStreamEvent {
+  data class Thinking(val statusText: String?) : ThrottledStreamEvent
+
   data class Progress(val accumulatedText: String) : ThrottledStreamEvent
 
   data class Completed(
@@ -105,6 +108,9 @@ class AiGenerationCoordinator(
 
   private val _streamingText = MutableStateFlow("")
   val streamingText: StateFlow<String> = _streamingText.asStateFlow()
+
+  private val _thinkingStatus = MutableStateFlow<String?>(null)
+  val thinkingStatus: StateFlow<String?> = _thinkingStatus.asStateFlow()
 
   private val _suggestedReplies = MutableStateFlow(SuggestedRepliesState())
   val suggestedReplies: StateFlow<SuggestedRepliesState> = _suggestedReplies.asStateFlow()
@@ -157,6 +163,7 @@ class AiGenerationCoordinator(
     latestRunToken = runToken
     latestPartialText = ""
     _streamingText.value = ""
+    _thinkingStatus.value = null
     _generationMeta.value =
       GenerationMetaState(
         isGenerating = true,
@@ -212,6 +219,9 @@ class AiGenerationCoordinator(
 
           val buffer = StringBuilder(512)
           var lastEmitTimeMs = 0L
+          val thinkingBuffer = StringBuilder(256)
+          var lastThinkingEmitTimeMs = 0L
+          var hasAnswerStarted = false
           val isSkillCreatorActive =
             req.activeSkillId == SkillEntity.SYSTEM_SKILL_CREATOR_ID ||
               req.activeSkillName == SkillCreatorHelper.SYSTEM_SKILL_CREATOR_NAME
@@ -230,7 +240,27 @@ class AiGenerationCoordinator(
             )
             .transform { chunk ->
               when (chunk) {
+                is StreamChunk.Thinking -> {
+                  if (!hasAnswerStarted) {
+                    thinkingBuffer.append(chunk.text)
+                    val now = System.currentTimeMillis()
+                    if (
+                      lastThinkingEmitTimeMs == 0L ||
+                        now - lastThinkingEmitTimeMs >= STREAM_EMIT_INTERVAL_MS
+                    ) {
+                      val status = ThinkingStatusFormatter.formatStatus(thinkingBuffer.toString())
+                      if (status != null) {
+                        lastThinkingEmitTimeMs = now
+                        emit(ThrottledStreamEvent.Thinking(status))
+                      }
+                    }
+                  }
+                }
                 is StreamChunk.Delta -> {
+                  if (!hasAnswerStarted && chunk.text.isNotEmpty()) {
+                    hasAnswerStarted = true
+                    emit(ThrottledStreamEvent.Thinking(null))
+                  }
                   buffer.append(chunk.text)
                   val now = System.currentTimeMillis()
                   if (now - lastEmitTimeMs >= STREAM_EMIT_INTERVAL_MS) {
@@ -289,10 +319,15 @@ class AiGenerationCoordinator(
             .flowOn(Dispatchers.Default)
             .collect { event ->
               when (event) {
+                is ThrottledStreamEvent.Thinking -> {
+                  _thinkingStatus.value = event.statusText
+                }
                 is ThrottledStreamEvent.Progress -> {
+                  _thinkingStatus.value = null
                   _streamingText.value = event.accumulatedText
                 }
                 is ThrottledStreamEvent.Completed -> {
+                  _thinkingStatus.value = null
                   var createdSkillSavedName: String? = null
                   var skillCreationFailed = false
 
@@ -414,6 +449,7 @@ class AiGenerationCoordinator(
                   finishedNaturally = true
                 }
                 is ThrottledStreamEvent.Error -> {
+                  _thinkingStatus.value = null
                   finishedWithError = event.partialText.isEmpty()
                   val textToSave =
                     if (event.partialText.isNotEmpty()) {
@@ -447,6 +483,7 @@ class AiGenerationCoordinator(
         } finally {
           latestPartialText = ""
           _streamingText.value = ""
+          _thinkingStatus.value = null
           _generationMeta.value = GenerationMetaState()
 
           val latestTitle =
@@ -493,6 +530,7 @@ class AiGenerationCoordinator(
     activeJob = null
     latestPartialText = ""
     _streamingText.value = ""
+    _thinkingStatus.value = null
     _generationMeta.value = GenerationMetaState()
 
     if (savePartial && placeholderId != null && convId != null) {

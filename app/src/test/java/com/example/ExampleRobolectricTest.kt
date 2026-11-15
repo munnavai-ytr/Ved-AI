@@ -53,6 +53,7 @@ import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.remote.GeminiApiService
 import com.example.data.remote.GeminiModelDto
 import com.example.data.remote.OpenRouterApiService
+import com.example.data.remote.StreamChunk
 import com.example.data.remote.StreamingAiClient
 import com.example.data.repository.ChatRepository
 import com.example.data.security.ApiKeyStore
@@ -66,6 +67,9 @@ import com.example.data.util.SkillCreateParseResult
 import com.example.data.util.SkillCreatorHelper
 import com.example.data.util.SkillMatcher
 import com.example.data.util.SpeechAndTtsUtils
+import com.example.data.util.ThinkingStatusFormatter
+import com.example.service.AiGenerationCoordinator
+import com.example.service.GenerationRequest
 import com.example.service.VedNotifications
 import com.example.ui.screens.MemoryScreen
 import com.example.ui.screens.SkillsScreen
@@ -74,14 +78,22 @@ import com.example.ui.viewmodel.SkillsViewModel
 import java.io.File
 import java.io.RandomAccessFile
 import kotlinx.serialization.json.Json
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import org.json.JSONObject
 import retrofit2.Retrofit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -2139,4 +2151,290 @@ class ExampleRobolectricTest {
         db.close()
       }
     }
+
+  @Test
+  fun `gemini thinkingConfig request inclusion and sse thought part separation work accurately`() {
+    val client = StreamingAiClient(OkHttpClient())
+    assertTrue(StreamingAiClient.modelSupportsThinking("gemini-2.5-flash"))
+    assertTrue(StreamingAiClient.modelSupportsThinking("gemini-3-flash-preview"))
+    assertTrue(StreamingAiClient.modelSupportsThinking("gemini-flash-latest"))
+    assertFalse(StreamingAiClient.modelSupportsThinking("gemini-2.0-flash"))
+
+    val msg =
+      MessageEntity(
+        id = "u1",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_USER,
+        content = "Solve this puzzle",
+        createdAt = 1L,
+      )
+
+    val streamReq =
+      client.buildGeminiRequest(
+        modelId = "gemini-3-flash-preview",
+        apiKey = "test-key",
+        history = listOf(msg),
+        stream = true,
+      )
+    val streamBuf = Buffer()
+    streamReq.body!!.writeTo(streamBuf)
+    val streamJson = JSONObject(streamBuf.readUtf8())
+    assertTrue(
+      streamJson
+        .optJSONObject("generationConfig")
+        ?.optJSONObject("thinkingConfig")
+        ?.optBoolean("includeThoughts") == true
+    )
+
+    val nonStreamReq =
+      client.buildGeminiRequest(
+        modelId = "gemini-3-flash-preview",
+        apiKey = "test-key",
+        history = listOf(msg),
+        stream = false,
+      )
+    val nonStreamBuf = Buffer()
+    nonStreamReq.body!!.writeTo(nonStreamBuf)
+    val nonStreamJson = JSONObject(nonStreamBuf.readUtf8())
+    assertFalse(nonStreamJson.has("generationConfig"))
+
+    val ssePayload =
+      """
+      {
+        "candidates": [
+          {
+            "content": {
+              "parts": [
+                {"text": "First, I need to check the edge cases.", "thought": true},
+                {"text": "Here is the verified answer.", "thought": false},
+                {"text": " And a final detail."}
+              ]
+            }
+          }
+        ],
+        "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 8}
+      }
+      """.trimIndent()
+
+    val parsed = client.parseGeminiSsePayload(ssePayload)
+    assertEquals(3, parsed.parts.size)
+    assertTrue(parsed.parts[0].isThought)
+    assertEquals("First, I need to check the edge cases.", parsed.parts[0].text)
+    assertFalse(parsed.parts[1].isThought)
+    assertFalse(parsed.parts[2].isThought)
+    assertEquals("Here is the verified answer. And a final detail.", parsed.text)
+    assertEquals(12, parsed.promptTokens)
+    assertEquals(8, parsed.completionTokens)
+  }
+
+  @Test
+  fun `streamChat retries without thinkingConfig when unsupported and emits thinking before delta`() =
+    runTest {
+      val requestPayloads = mutableListOf<String>()
+      var callCount = 0
+      val interceptor = Interceptor { chain ->
+        val req = chain.request()
+        val buf = Buffer()
+        req.body?.writeTo(buf)
+        requestPayloads.add(buf.readUtf8())
+        callCount++
+
+        if (callCount == 1) {
+          val errJson =
+            """{"error":{"code":400,"message":"Unknown name \"thinkingConfig\": Cannot find field."}}"""
+          Response.Builder()
+            .request(req)
+            .protocol(Protocol.HTTP_1_1)
+            .code(400)
+            .message("Bad Request")
+            .body(errJson.toResponseBody("application/json".toMediaType()))
+            .build()
+        } else {
+          val sse =
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"First, let me inspect the schema carefully.\",\"thought\":true}]}}]}\n\n" +
+              "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Now let me write the final query.\",\"thought\":true}]}}]}\n\n" +
+              "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"SELECT * FROM users;\"}]}}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":4}}\n\n"
+          Response.Builder()
+            .request(req)
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(sse.toResponseBody("text/event-stream".toMediaType()))
+            .build()
+        }
+      }
+
+      val client = StreamingAiClient(OkHttpClient.Builder().addInterceptor(interceptor).build())
+      val msg =
+        MessageEntity(
+          id = "u1",
+          conversationId = "c1",
+          role = MessageEntity.ROLE_USER,
+          content = "Write SQL",
+          createdAt = 1L,
+        )
+
+      val chunks =
+        client
+          .streamChat(
+            provider = AiProvider.GEMINI,
+            modelId = "gemini-2.5-flash",
+            apiKey = "test-key",
+            history = listOf(msg),
+          )
+          .toList()
+
+      assertEquals(2, callCount)
+      assertTrue(JSONObject(requestPayloads[0]).has("generationConfig"))
+      assertFalse(JSONObject(requestPayloads[1]).has("generationConfig"))
+
+      assertEquals(4, chunks.size)
+      assertEquals(StreamChunk.Thinking("First, let me inspect the schema carefully."), chunks[0])
+      assertEquals(StreamChunk.Thinking("Now let me write the final query."), chunks[1])
+      assertEquals(StreamChunk.Delta("SELECT * FROM users;"), chunks[2])
+      assertEquals(StreamChunk.Completed(promptTokens = 5, completionTokens = 4), chunks[3])
+    }
+
+  @Test
+  fun `thinking status formatter extracts concise changing status labels without markdown clutter`() {
+    val firstStatus =
+      ThinkingStatusFormatter.formatStatus("**First, let me check** the user's Kotlin coroutine flow setup.")
+    assertEquals("Checking the user's Kotlin coroutine flow setup…", firstStatus)
+    assertTrue((firstStatus?.length ?: 999) <= 58)
+
+    val secondStatus =
+      ThinkingStatusFormatter.formatStatus(
+        "First, let me check the user's Kotlin coroutine flow setup.\nNext, I need to compare room index performance across tables."
+      )
+    assertNotEquals(firstStatus, secondStatus)
+    assertEquals("Comparing room index performance across tables…", secondStatus)
+    assertTrue((secondStatus?.length ?: 999) <= 58)
+
+    assertNull(ThinkingStatusFormatter.formatStatus("   "))
+    assertNull(ThinkingStatusFormatter.formatStatus(".."))
+  }
+
+  @Test
+  fun `coordinator tracks thinking status separately from persisted answer and clears on delta`() =
+    runTest {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val db = Room.inMemoryDatabaseBuilder(context, VedDatabase::class.java).build()
+      try {
+        val sseInterceptor = Interceptor { chain ->
+          val sse =
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"First, I need to analyze your SQLite schema.\",\"thought\":true}]}}]}\n\n" +
+              "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Use a composite index on (conversationId, createdAt).\"}]}}],\"usageMetadata\":{\"promptTokenCount\":9,\"candidatesTokenCount\":11}}\n\n"
+          Response.Builder()
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .code(200)
+            .message("OK")
+            .body(sse.toResponseBody("text/event-stream".toMediaType()))
+            .build()
+        }
+        val okHttp = OkHttpClient.Builder().addInterceptor(sseInterceptor).build()
+        val fakeRetrofit = Retrofit.Builder().baseUrl("https://openrouter.ai/").client(okHttp).build()
+        val apiKeyStore =
+          object : ApiKeyStore(context) {
+            override suspend fun getEffectiveKey(provider: AiProvider): String = "test-gemini-key"
+          }
+
+        val repo =
+          ChatRepository(
+            appContext = context,
+            chatDao = db.chatDao(),
+            memoryDao = db.memoryDao(),
+            skillDao = db.skillDao(),
+            streamingClient = StreamingAiClient(okHttp),
+            geminiApi = fakeRetrofit.create(GeminiApiService::class.java),
+            openRouterApi = fakeRetrofit.create(OpenRouterApiService::class.java),
+            apiKeyStore = apiKeyStore,
+            preferencesRepository = UserPreferencesRepository(context),
+          )
+        val coordinator = AiGenerationCoordinator(context, repo)
+
+        val conv = repo.createConversation(AiProvider.GEMINI, "gemini-3-flash-preview", "SQLite Chat")
+        val userMsg = repo.insertUserMessage(conv.id, "How should I index messages?")
+
+        coordinator.startGeneration(
+          GenerationRequest(
+            conversationId = conv.id,
+            conversationTitle = conv.title,
+            provider = AiProvider.GEMINI,
+            modelId = "gemini-3-flash-preview",
+            history = listOf(userMsg),
+            attachmentsByMessageId = emptyMap(),
+            systemPrompt = "",
+            memoryContext = "",
+            skillsIndexBlock = "",
+            activeSkillBlock = "",
+            activeSkillName = null,
+            shouldAutoTitle = false,
+            firstUserPrompt = userMsg.content,
+            includeSuggestedReplies = false,
+          )
+        )
+
+        val deadline = System.currentTimeMillis() + 5_000L
+        while (coordinator.generationMeta.value.isGenerating && System.currentTimeMillis() < deadline) {
+          kotlinx.coroutines.delay(25L)
+        }
+
+        assertFalse(coordinator.generationMeta.value.isGenerating)
+        assertNull(coordinator.thinkingStatus.value)
+        val savedMessages = repo.getMessagesSync(conv.id)
+        val savedAssistant = savedMessages.last { it.role == MessageEntity.ROLE_ASSISTANT }
+        assertEquals("Use a composite index on (conversationId, createdAt).", savedAssistant.content)
+        assertFalse(savedAssistant.content.contains("analyze your SQLite schema"))
+      } finally {
+        db.close()
+      }
+    }
+
+  @Test
+  fun `streaming message item renders live thinking status then switches cleanly to answer text`() {
+    val streamFlow = MutableStateFlow("")
+    val thinkingState = MutableStateFlow<String?>("Analyzing SQLite index strategy…")
+    val placeholderMsg =
+      MessageEntity(
+        id = "a-think",
+        conversationId = "c1",
+        role = MessageEntity.ROLE_ASSISTANT,
+        content = "",
+        modelId = "gemini-3-flash-preview",
+        createdAt = 1L,
+      )
+
+    composeTestRule.setContent {
+      val currentThinking by thinkingState.collectAsState()
+      VedTheme(themeMode = ThemeMode.LIGHT) {
+        StreamingChatMessageItem(
+          message = placeholderMsg,
+          streamingTextFlow = streamFlow,
+          thinkingStatusText = currentThinking,
+          isLastAssistantMessage = true,
+          onRegenerate = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("thinking_indicator").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("thinking_live_status_text").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Analyzing SQLite index strategy…").assertIsDisplayed()
+
+    thinkingState.value = null
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("thinking_indicator").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Thinking").assertIsDisplayed()
+
+    streamFlow.value = "Add a composite index on `(conversationId, createdAt)`."
+    composeTestRule.waitForIdle()
+    assertTrue(
+      composeTestRule.onAllNodes(hasTestTag("thinking_indicator")).fetchSemanticsNodes().isEmpty()
+    )
+    composeTestRule
+      .onNodeWithText("Add a composite index on (conversationId, createdAt).", substring = true)
+      .assertIsDisplayed()
+  }
 }
