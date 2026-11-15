@@ -2,6 +2,9 @@ package com.example.ui.screens
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -73,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.entity.MessageEntity
+import com.example.data.model.AiProvider
 import com.example.ui.components.ChatDrawerContent
 import com.example.ui.components.ChatInputBar
 import com.example.ui.components.ChatMessageItem
@@ -93,8 +97,9 @@ private val SuggestedPrompts =
   )
 
 /**
- * Primary chat screen with history drawer, isolated streaming markdown messages, suggested
- * prompts, copy/share export, and fixed bottom input bar.
+ * Primary chat screen with history drawer & search, isolated streaming markdown messages,
+ * user message editing, Gemini multimodal photo picker, suggested prompts, copy/share export,
+ * and fixed bottom input bar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -105,6 +110,7 @@ fun ChatScreen(
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val inputText by viewModel.inputText.collectAsStateWithLifecycle()
+  val drawerSearchQuery by viewModel.drawerSearchQuery.collectAsStateWithLifecycle()
 
   val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
   val snackbarHostState = remember { SnackbarHostState() }
@@ -114,6 +120,15 @@ fun ChatScreen(
   val clipboard = LocalClipboardManager.current
   val haptic = LocalHapticFeedback.current
   var showShareMenu by remember { mutableStateOf(false) }
+
+  val photoPickerLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+      if (uri != null) {
+        viewModel.attachImage(uri)
+      }
+    }
 
   BackHandler(enabled = drawerState.isOpen) {
     scope.launch { drawerState.close() }
@@ -219,9 +234,25 @@ fun ChatScreen(
   val activeModelChipText =
     remember(uiState.activeModelId) { uiState.activeModelId.substringAfterLast('/') }
 
+  val isGeminiActive = uiState.activeProvider == AiProvider.GEMINI
+
   val onRegenerate = remember(viewModel) { { viewModel.regenerateLastResponse() } }
   val onSend = remember(viewModel) { { viewModel.sendMessage() } }
   val onStop = remember(viewModel) { { viewModel.stopGeneration() } }
+  val onCancelEdit = remember(viewModel) { { viewModel.cancelEditing() } }
+  val onRemoveImage = remember(viewModel) { { viewModel.clearAttachedImage() } }
+  val onAttachImageClick =
+    remember(isGeminiActive, photoPickerLauncher, viewModel) {
+      {
+        if (isGeminiActive) {
+          photoPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+          )
+        } else {
+          viewModel.notifyImageUnsupportedForOpenRouter()
+        }
+      }
+    }
   val onSelectConversation =
     remember(viewModel, scope, drawerState) {
       { id: String ->
@@ -254,6 +285,9 @@ fun ChatScreen(
       ChatDrawerContent(
         conversations = uiState.conversations,
         activeConversationId = uiState.activeConversationId,
+        searchQuery = drawerSearchQuery,
+        onSearchQueryChange = viewModel::onSearchQueryChanged,
+        onClearSearch = viewModel::clearSearch,
         onSelectConversation = onSelectConversation,
         onDeleteConversation = onDeleteConversation,
         onNewChat = onDrawerNewChat,
@@ -413,12 +447,22 @@ fun ChatScreen(
                     onRegenerate = onRegenerate,
                   )
                 } else {
+                  val onEdit =
+                    remember(message, viewModel) {
+                      if (message.role == MessageEntity.ROLE_USER) {
+                        { viewModel.startEditingMessage(message) }
+                      } else {
+                        null
+                      }
+                    }
                   ChatMessageItem(
                     message = message,
                     displayContent = message.content,
                     isStreaming = false,
                     isLastAssistantMessage = index == lastAssistantIndex,
                     onRegenerate = onRegenerate,
+                    canEdit = !uiState.isGenerating,
+                    onEditMessage = onEdit,
                   )
                 }
               }
@@ -432,6 +476,12 @@ fun ChatScreen(
           isGenerating = uiState.isGenerating,
           onSend = onSend,
           onStop = onStop,
+          isEditing = uiState.editingMessageId != null,
+          onCancelEdit = onCancelEdit,
+          pendingImageUri = uiState.pendingImageUri,
+          isGeminiActive = isGeminiActive,
+          onAttachImageClick = onAttachImageClick,
+          onRemoveImage = onRemoveImage,
         )
       }
     }

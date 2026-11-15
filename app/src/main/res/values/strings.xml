@@ -15,6 +15,13 @@
     <string name="cd_toggle_key_visibility">Toggle API key visibility</string>
     <string name="cd_delete_chat">Delete conversation</string>
     <string name="cd_refresh_models">Refresh models</string>
+    <string name="cd_search_chats">Search conversations</string>
+    <string name="cd_clear_search">Clear search</string>
+    <string name="cd_edit_message">Edit message</string>
+    <string name="cd_cancel_edit">Cancel editing</string>
+    <string name="cd_attach_image">Attach image</string>
+    <string name="cd_remove_image">Remove attached image</string>
+    <string name="cd_attached_image">Attached image</string>
 
     <!-- Onboarding -->
     <string name="onboarding_skip">Skip</string>
@@ -36,13 +43,19 @@
     <string name="chat_open_settings">Open Settings</string>
     <string name="chat_drawer_title">Conversations</string>
     <string name="chat_drawer_empty">No saved conversations yet</string>
+    <string name="chat_drawer_search_placeholder">Search conversations…</string>
+    <string name="chat_drawer_search_empty">No matching conversations</string>
     <string name="chat_new">New chat</string>
     <string name="chat_deleted">Conversation deleted</string>
+    <string name="chat_editing_banner">Editing message</string>
+    <string name="chat_image_openrouter_unsupported">Image input is only supported with Gemini</string>
+    <string name="chat_image_attach_failed">Could not load selected image</string>
     <string name="action_undo">Undo</string>
     <string name="action_copy">Copy</string>
     <string name="action_copied">Copied</string>
     <string name="action_regenerate">Regenerate</string>
     <string name="action_share">Share</string>
+    <string name="message_tokens_count">%1$d tokens</string>
     <string name="chat_share_title">Share conversation</string>
     <string name="chat_copied_full">Full conversation copied</string>
     <string name="chat_copied_message">Copied to clipboard</string>
@@ -61,6 +74,14 @@
     <string name="settings_search_models">Search OpenRouter models…</string>
     <string name="settings_loading_models">Fetching OpenRouter models…</string>
     <string name="settings_models_count">%1$d models available</string>
+    <string name="settings_system_prompt_section">Custom instructions</string>
+    <string name="settings_system_prompt_note">Applied as system instructions across new and existing chats.</string>
+    <string name="settings_system_prompt_placeholder">e.g. Answer concisely, prefer Kotlin examples…</string>
+    <string name="settings_system_prompt_save">Save instructions</string>
+    <string name="settings_backup_section">Backup</string>
+    <string name="settings_backup_note">Export all chats to a JSON file or merge a previous backup into your local history.</string>
+    <string name="settings_export_chats">Export chat history</string>
+    <string name="settings_import_chats">Import chat history</string>
     <string name="settings_keys_section">API Keys (Encrypted)</string>
     <string name="settings_keys_note">Optional local overrides are encrypted via Android Keystore and take priority over build-time secrets.</string>
     <string name="settings_gemini_key_label">Gemini API Key Override</string>
@@ -73,4 +94,29 @@
     <string name="settings_key_status_missing">Status: Not configured</string>
     <string name="settings_key_saved">Encrypted key saved</string>
     <string name="settings_key_cleared">Local override removed</string>
+    <string name="settings_memory_subtitle">Facts Ved remembers about you across all chats</string>
+    <string name="cd_open_memory">Open memory management</string>
+
+    <!-- Memory -->
+    <string name="memory_title">Memory</string>
+    <string name="memory_search_placeholder">Search memories…</string>
+    <string name="memory_add_button">Add memory</string>
+    <string name="memory_clear_all">Clear all</string>
+    <string name="memory_clear_confirm_title">Clear all memories?</string>
+    <string name="memory_clear_confirm_body">This permanently removes everything Ved remembers across chats. Your conversations will not be deleted.</string>
+    <string name="memory_clear_confirm_action">Clear all</string>
+    <string name="memory_add_dialog_title">Add memory</string>
+    <string name="memory_fact_label">Fact to remember</string>
+    <string name="memory_fact_placeholder">e.g. I prefer concise Kotlin answers</string>
+    <string name="memory_category_label">Category</string>
+    <string name="memory_source_ai">Ved</string>
+    <string name="memory_source_user">You</string>
+    <string name="memory_empty_title">No memories yet</string>
+    <string name="memory_empty_body">Ved automatically remembers helpful facts you share in chats, or you can add them manually here.</string>
+    <string name="memory_search_empty_title">No matching memories</string>
+    <string name="memory_search_empty_body">Try a different keyword or clear the search filter.</string>
+    <string name="cd_edit_memory">Edit memory</string>
+    <string name="cd_delete_memory">Delete memory</string>
+    <string name="cd_save_memory">Save memory</string>
+    <string name="action_cancel">Cancel</string>
 </resources>

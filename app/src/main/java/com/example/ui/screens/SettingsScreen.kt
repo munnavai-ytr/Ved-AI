@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +22,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.FileUpload
+import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.rounded.Check
@@ -60,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -74,22 +81,46 @@ import com.example.data.model.AiProvider
 import com.example.data.model.ThemeMode
 import com.example.data.security.KeySource
 import com.example.ui.viewmodel.SettingsViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Settings screen for theme mode, AI provider switching, model selection (including dynamic
- * OpenRouter `/models` catalog), and Keystore-encrypted API key overrides.
+ * OpenRouter `/models` catalog), custom system instructions, backup export/import, and
+ * Keystore-encrypted API key overrides.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
   viewModel: SettingsViewModel,
   onNavigateBack: () -> Unit,
+  onOpenMemory: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
   val snackbarHostState = remember { SnackbarHostState() }
   val haptic = LocalHapticFeedback.current
+  val context = LocalContext.current
   var showOpenRouterSheet by remember { mutableStateOf(false) }
+
+  val exportLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+      if (uri != null) {
+        viewModel.exportBackup(context, uri)
+      }
+    }
+
+  val importLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+      if (uri != null) {
+        viewModel.importBackup(context, uri)
+      }
+    }
 
   LaunchedEffect(uiState.feedbackMessage) {
     val msg = uiState.feedbackMessage
@@ -218,7 +249,142 @@ fun SettingsScreen(
           }
         }
 
-        // 3. Encrypted API Key Overrides
+        // 3. Custom Instructions (System Prompt)
+        item {
+          SettingsSectionCard(title = stringResource(R.string.settings_system_prompt_section)) {
+            var promptDraft by remember(uiState.systemPrompt) { mutableStateOf(uiState.systemPrompt) }
+
+            Text(
+              text = stringResource(R.string.settings_system_prompt_note),
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedTextField(
+              value = promptDraft,
+              onValueChange = { promptDraft = it },
+              placeholder = { Text(stringResource(R.string.settings_system_prompt_placeholder)) },
+              minLines = 3,
+              maxLines = 6,
+              shape = RoundedCornerShape(16.dp),
+              modifier = Modifier.fillMaxWidth().testTag("system_prompt_input"),
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+              onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                viewModel.saveSystemPrompt(promptDraft)
+              },
+              enabled = promptDraft.trim() != uiState.systemPrompt.trim(),
+              shape = RoundedCornerShape(14.dp),
+              modifier = Modifier.heightIn(min = 48.dp).testTag("save_system_prompt_button"),
+            ) {
+              Text(text = stringResource(R.string.settings_system_prompt_save))
+            }
+          }
+        }
+
+        // 4. Memory
+        item {
+          Surface(
+            onClick = {
+              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+              onOpenMemory()
+            },
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("settings_memory_row"),
+          ) {
+            Row(
+              modifier = Modifier.padding(18.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Outlined.Psychology,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp),
+              )
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = stringResource(R.string.memory_title),
+                  style = MaterialTheme.typography.titleMedium,
+                  color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                  text = stringResource(R.string.settings_memory_subtitle),
+                  style = MaterialTheme.typography.bodySmall,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+              }
+              Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = stringResource(R.string.cd_open_memory),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
+
+        // 5. Backup (Export / Import)
+        item {
+          SettingsSectionCard(title = stringResource(R.string.settings_backup_section)) {
+            Text(
+              text = stringResource(R.string.settings_backup_note),
+              style = MaterialTheme.typography.bodySmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+              OutlinedButton(
+                onClick = {
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  exportLauncher.launch(defaultBackupFilename())
+                },
+                enabled = !uiState.isBackupBusy,
+                shape = RoundedCornerShape(14.dp),
+                modifier =
+                  Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("export_backup_button"),
+              ) {
+                Icon(
+                  imageVector = Icons.Outlined.FileUpload,
+                  contentDescription = null,
+                  modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(text = stringResource(R.string.settings_export_chats))
+              }
+
+              OutlinedButton(
+                onClick = {
+                  haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                  importLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                },
+                enabled = !uiState.isBackupBusy,
+                shape = RoundedCornerShape(14.dp),
+                modifier =
+                  Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("import_backup_button"),
+              ) {
+                Icon(
+                  imageVector = Icons.Outlined.FileDownload,
+                  contentDescription = null,
+                  modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(text = stringResource(R.string.settings_import_chats))
+              }
+            }
+          }
+        }
+
+        // 5. Encrypted API Key Overrides
         item {
           SettingsSectionCard(title = stringResource(R.string.settings_keys_section)) {
             Text(
@@ -269,6 +435,11 @@ fun SettingsScreen(
       onDismiss = { showOpenRouterSheet = false },
     )
   }
+}
+
+private fun defaultBackupFilename(): String {
+  val dateStr = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
+  return "ved_backup_$dateStr.json"
 }
 
 @Composable

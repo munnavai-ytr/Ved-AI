@@ -27,6 +27,7 @@ data class UserPreferences(
   val openRouterModel: String = FallbackOpenRouterModels.first().id,
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
   val onboardingCompleted: Boolean = false,
+  val systemPrompt: String = "",
 ) {
   val activeModelId: String
     get() =
@@ -49,6 +50,7 @@ class UserPreferencesRepository(private val context: Context) {
         openRouterModel = prefs[KEY_OPENROUTER_MODEL] ?: FallbackOpenRouterModels.first().id,
         themeMode = ThemeMode.fromId(prefs[KEY_THEME_MODE]),
         onboardingCompleted = prefs[KEY_ONBOARDING_COMPLETED] ?: false,
+        systemPrompt = prefs[KEY_SYSTEM_PROMPT] ?: "",
       )
     }
 
@@ -72,11 +74,16 @@ class UserPreferencesRepository(private val context: Context) {
     context.vedDataStore.edit { it[KEY_ONBOARDING_COMPLETED] = completed }
   }
 
+  suspend fun setSystemPrompt(prompt: String) {
+    context.vedDataStore.edit { it[KEY_SYSTEM_PROMPT] = prompt }
+  }
+
   private companion object {
     val KEY_ACTIVE_PROVIDER = stringPreferencesKey("active_provider")
     val KEY_GEMINI_MODEL = stringPreferencesKey("gemini_model")
     val KEY_OPENROUTER_MODEL = stringPreferencesKey("openrouter_model")
     val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
     val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+    val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
   }
 }

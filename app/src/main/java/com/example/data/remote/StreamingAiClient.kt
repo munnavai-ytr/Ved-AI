@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import com.example.data.local.entity.MessageEntity
 import com.example.data.model.AiProvider
+import com.example.data.util.MemoryPromptHelper
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -22,7 +23,10 @@ import org.json.JSONObject
 sealed interface StreamChunk {
   data class Delta(val text: String) : StreamChunk
 
-  data object Completed : StreamChunk
+  data class Completed(
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+  ) : StreamChunk
 
   data class Error(val message: String) : StreamChunk
 }
@@ -37,18 +41,45 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     modelId: String,
     apiKey: String,
     history: List<MessageEntity>,
+    systemPrompt: String = "",
+    memoryContext: String = "",
+    imageBase64ByUri: Map<String, String> = emptyMap(),
   ): Flow<StreamChunk> = callbackFlow {
-    val request =
-      when (provider) {
-        AiProvider.GEMINI -> buildGeminiRequest(modelId = modelId, apiKey = apiKey, history = history, stream = true)
-        AiProvider.OPENROUTER -> buildOpenRouterRequest(modelId = modelId, apiKey = apiKey, history = history, stream = true)
-      }
-
-    val call = okHttpClient.newCall(request)
+    var activeCall: okhttp3.Call? = null
 
     val job =
       launch(Dispatchers.IO) {
         try {
+          val combinedSystemInstruction =
+            MemoryPromptHelper.buildCombinedSystemInstruction(
+              customSystemPrompt = systemPrompt,
+              memoryContextBlock = memoryContext,
+            )
+
+          val request =
+            when (provider) {
+              AiProvider.GEMINI ->
+                buildGeminiRequest(
+                  modelId = modelId,
+                  apiKey = apiKey,
+                  history = history,
+                  stream = true,
+                  systemPrompt = combinedSystemInstruction,
+                  imageBase64ByUri = imageBase64ByUri,
+                )
+              AiProvider.OPENROUTER ->
+                buildOpenRouterRequest(
+                  modelId = modelId,
+                  apiKey = apiKey,
+                  history = history,
+                  stream = true,
+                  systemPrompt = combinedSystemInstruction,
+                )
+            }
+
+          val call = okHttpClient.newCall(request)
+          activeCall = call
+
           call.execute().use { response ->
             if (!response.isSuccessful) {
               val errorBody = response.body?.string().orEmpty()
@@ -64,6 +95,9 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
               return@launch
             }
 
+            var latestPromptTokens: Int? = null
+            var latestCompletionTokens: Int? = null
+
             while (!source.exhausted()) {
               val line = source.readUtf8Line() ?: break
               if (line.isBlank() || line.startsWith(":")) continue
@@ -73,39 +107,42 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
                 if (payload.isEmpty()) continue
                 if (payload == "[DONE]") break
 
-                when (provider) {
-                  AiProvider.GEMINI -> {
-                    val parsed = parseGeminiSsePayload(payload)
-                    if (parsed.error != null) {
-                      trySend(StreamChunk.Error(parsed.error))
-                      close()
-                      return@launch
-                    }
-                    if (!parsed.text.isNullOrEmpty()) {
-                      trySend(StreamChunk.Delta(parsed.text))
-                    }
+                val parsed =
+                  when (provider) {
+                    AiProvider.GEMINI -> parseGeminiSsePayload(payload)
+                    AiProvider.OPENROUTER -> parseOpenRouterSsePayload(payload)
                   }
-                  AiProvider.OPENROUTER -> {
-                    val parsed = parseOpenRouterSsePayload(payload)
-                    if (parsed.error != null) {
-                      trySend(StreamChunk.Error(parsed.error))
-                      close()
-                      return@launch
-                    }
-                    if (!parsed.text.isNullOrEmpty()) {
-                      trySend(StreamChunk.Delta(parsed.text))
-                    }
-                  }
+
+                if (parsed.error != null) {
+                  trySend(StreamChunk.Error(parsed.error))
+                  close()
+                  return@launch
+                }
+                if (parsed.promptTokens != null) {
+                  latestPromptTokens = parsed.promptTokens
+                }
+                if (parsed.completionTokens != null) {
+                  latestCompletionTokens = parsed.completionTokens
+                }
+                if (!parsed.text.isNullOrEmpty()) {
+                  trySend(StreamChunk.Delta(parsed.text))
                 }
               }
             }
 
-            trySend(StreamChunk.Completed)
+            trySend(
+              StreamChunk.Completed(
+                promptTokens = latestPromptTokens,
+                completionTokens = latestCompletionTokens,
+              )
+            )
             close()
           }
         } catch (e: IOException) {
-          if (!call.isCanceled()) {
-            trySend(StreamChunk.Error(e.message ?: "Network error while contacting ${provider.displayName}."))
+          if (activeCall?.isCanceled() != true) {
+            trySend(
+              StreamChunk.Error(e.message ?: "Network error while contacting ${provider.displayName}.")
+            )
           }
           close()
         } catch (e: Exception) {
@@ -115,7 +152,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       }
 
     awaitClose {
-      call.cancel()
+      activeCall?.cancel()
       job.cancel()
     }
   }
@@ -130,6 +167,7 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     apiKey: String,
     userPrompt: String,
     assistantReply: String,
+    systemPrompt: String = "",
   ): String? =
     withContext(Dispatchers.IO) {
       if (apiKey.isBlank()) return@withContext null
@@ -153,9 +191,21 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       val request =
         when (provider) {
           AiProvider.GEMINI ->
-            buildGeminiRequest(modelId = modelId, apiKey = apiKey, history = syntheticHistory, stream = false)
+            buildGeminiRequest(
+              modelId = modelId,
+              apiKey = apiKey,
+              history = syntheticHistory,
+              stream = false,
+              systemPrompt = systemPrompt,
+            )
           AiProvider.OPENROUTER ->
-            buildOpenRouterRequest(modelId = modelId, apiKey = apiKey, history = syntheticHistory, stream = false)
+            buildOpenRouterRequest(
+              modelId = modelId,
+              apiKey = apiKey,
+              history = syntheticHistory,
+              stream = false,
+              systemPrompt = systemPrompt,
+            )
         }
 
       runCatching {
@@ -190,20 +240,44 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     apiKey: String,
     history: List<MessageEntity>,
     stream: Boolean,
+    systemPrompt: String = "",
+    imageBase64ByUri: Map<String, String> = emptyMap(),
   ): Request {
     val action = if (stream) "streamGenerateContent?alt=sse" else "generateContent"
     val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelId:$action"
 
     val contentsArray = JSONArray()
     for (msg in history) {
-      if (msg.isError || msg.content.isBlank()) continue
+      if (msg.isError) continue
+      val partsArray = JSONArray()
+      if (msg.content.isNotBlank()) {
+        partsArray.put(JSONObject().put("text", msg.content))
+      }
+      val imageBase64 = msg.imageUri?.let { imageBase64ByUri[it] }
+      if (!imageBase64.isNullOrBlank()) {
+        partsArray.put(
+          JSONObject()
+            .put(
+              "inlineData",
+              JSONObject().put("mimeType", "image/jpeg").put("data", imageBase64),
+            )
+        )
+      }
+      if (partsArray.length() == 0) continue
+
       val role = if (msg.role == MessageEntity.ROLE_USER) "user" else "model"
-      val partObj = JSONObject().put("text", msg.content)
-      val partsArray = JSONArray().put(partObj)
       contentsArray.put(JSONObject().put("role", role).put("parts", partsArray))
     }
 
     val payload = JSONObject().put("contents", contentsArray)
+    val trimmedSystemPrompt = systemPrompt.trim()
+    if (trimmedSystemPrompt.isNotEmpty()) {
+      payload.put(
+        "systemInstruction",
+        JSONObject().put("parts", JSONArray().put(JSONObject().put("text", trimmedSystemPrompt))),
+      )
+    }
+
     val body = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
 
     return Request.Builder()
@@ -219,8 +293,14 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
     apiKey: String,
     history: List<MessageEntity>,
     stream: Boolean,
+    systemPrompt: String = "",
   ): Request {
     val messagesArray = JSONArray()
+    val trimmedSystemPrompt = systemPrompt.trim()
+    if (trimmedSystemPrompt.isNotEmpty()) {
+      messagesArray.put(JSONObject().put("role", "system").put("content", trimmedSystemPrompt))
+    }
+
     for (msg in history) {
       if (msg.isError || msg.content.isBlank()) continue
       val role = if (msg.role == MessageEntity.ROLE_USER) "user" else "assistant"
@@ -244,7 +324,12 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
       .build()
   }
 
-  private data class ParsedSse(val text: String? = null, val error: String? = null)
+  private data class ParsedSse(
+    val text: String? = null,
+    val error: String? = null,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+  )
 
   private fun parseGeminiSsePayload(rawJson: String): ParsedSse {
     return runCatching {
@@ -253,21 +338,39 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
           val msg = err.optString("message").ifBlank { "Gemini API error" }
           return ParsedSse(error = msg)
         }
-        val candidates = root.optJSONArray("candidates") ?: return ParsedSse()
-        val first = candidates.optJSONObject(0) ?: return ParsedSse()
-        val parts = first.optJSONObject("content")?.optJSONArray("parts") ?: return ParsedSse()
-        val count = parts.length()
-        if (count == 0) return ParsedSse()
-        if (count == 1) {
-          val text = parts.optJSONObject(0)?.optString("text", "")
-          return ParsedSse(text = text)
-        }
-        val sb = StringBuilder()
-        for (i in 0 until count) {
-          val text = parts.optJSONObject(i)?.optString("text", "") ?: ""
-          sb.append(text)
-        }
-        ParsedSse(text = sb.toString())
+
+        val usage = root.optJSONObject("usageMetadata")
+        val promptTokens =
+          if (usage != null && usage.has("promptTokenCount")) usage.optInt("promptTokenCount")
+          else null
+        val completionTokens =
+          if (usage != null && usage.has("candidatesTokenCount")) usage.optInt("candidatesTokenCount")
+          else null
+
+        val parts =
+          root.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+
+        val text =
+          if (parts == null || parts.length() == 0) {
+            null
+          } else if (parts.length() == 1) {
+            parts.optJSONObject(0)?.optString("text", "")
+          } else {
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+              sb.append(parts.optJSONObject(i)?.optString("text", "") ?: "")
+            }
+            sb.toString()
+          }
+
+        ParsedSse(
+          text = text,
+          promptTokens = promptTokens,
+          completionTokens = completionTokens,
+        )
       }
       .getOrElse { ParsedSse() }
   }
@@ -279,12 +382,24 @@ class StreamingAiClient(private val okHttpClient: OkHttpClient) {
           val msg = err.optString("message").ifBlank { "OpenRouter API error" }
           return ParsedSse(error = msg)
         }
-        val choices = root.optJSONArray("choices") ?: return ParsedSse()
-        val first = choices.optJSONObject(0) ?: return ParsedSse()
-        val delta = first.optJSONObject("delta") ?: return ParsedSse()
+
+        val usage = root.optJSONObject("usage")
+        val promptTokens =
+          if (usage != null && usage.has("prompt_tokens")) usage.optInt("prompt_tokens") else null
+        val completionTokens =
+          if (usage != null && usage.has("completion_tokens")) usage.optInt("completion_tokens")
+          else null
+
+        val delta =
+          root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
         val content =
-          if (delta.isNull("content")) null else delta.optString("content", "")
-        ParsedSse(text = content)
+          if (delta == null || delta.isNull("content")) null else delta.optString("content", "")
+
+        ParsedSse(
+          text = content,
+          promptTokens = promptTokens,
+          completionTokens = completionTokens,
+        )
       }
       .getOrElse { ParsedSse() }
   }

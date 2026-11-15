@@ -5,11 +5,13 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 
 /**
  * Represents a single user or assistant message inside a conversation.
  */
 @Immutable
+@Serializable
 @Entity(
   tableName = "messages",
   foreignKeys = [
@@ -30,6 +32,9 @@ data class MessageEntity(
   val modelId: String? = null,
   val isError: Boolean = false,
   val createdAt: Long,
+  val imageUri: String? = null,
+  val promptTokens: Int? = null,
+  val completionTokens: Int? = null,
 ) {
   companion object {
     const val ROLE_USER = "user"

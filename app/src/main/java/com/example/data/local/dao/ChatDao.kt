@@ -18,6 +18,17 @@ interface ChatDao {
   @Query("SELECT * FROM conversations ORDER BY updatedAt DESC")
   fun observeConversations(): Flow<List<ConversationEntity>>
 
+  @Query(
+    """
+    SELECT DISTINCT c.* FROM conversations c
+    LEFT JOIN messages m ON c.id = m.conversationId
+    WHERE c.title LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+       OR m.content LIKE '%' || :escapedQuery || '%' ESCAPE '\'
+    ORDER BY c.updatedAt DESC
+    """
+  )
+  fun searchConversations(escapedQuery: String): Flow<List<ConversationEntity>>
+
   @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
   fun observeMessages(conversationId: String): Flow<List<MessageEntity>>
 
@@ -27,8 +38,17 @@ interface ChatDao {
   @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
   suspend fun getMessagesSync(conversationId: String): List<MessageEntity>
 
+  @Query("SELECT * FROM conversations ORDER BY updatedAt DESC")
+  suspend fun getAllConversationsSync(): List<ConversationEntity>
+
+  @Query("SELECT * FROM messages ORDER BY createdAt ASC")
+  suspend fun getAllMessagesSync(): List<MessageEntity>
+
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertConversation(conversation: ConversationEntity)
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun insertConversations(conversations: List<ConversationEntity>)
 
   @Query("UPDATE conversations SET title = :title, updatedAt = :updatedAt WHERE id = :conversationId")
   suspend fun updateConversationTitle(conversationId: String, title: String, updatedAt: Long)
@@ -55,11 +75,31 @@ interface ChatDao {
   @Insert(onConflict = OnConflictStrategy.REPLACE)
   suspend fun insertMessages(messages: List<MessageEntity>)
 
-  @Query("UPDATE messages SET content = :content, isError = :isError WHERE id = :messageId")
-  suspend fun updateMessageContent(messageId: String, content: String, isError: Boolean)
+  @Query(
+    """
+    UPDATE messages
+    SET content = :content,
+        isError = :isError,
+        promptTokens = :promptTokens,
+        completionTokens = :completionTokens
+    WHERE id = :messageId
+    """
+  )
+  suspend fun updateMessageResult(
+    messageId: String,
+    content: String,
+    isError: Boolean,
+    promptTokens: Int?,
+    completionTokens: Int?,
+  )
 
   @Query("DELETE FROM messages WHERE id = :messageId")
   suspend fun deleteMessageById(messageId: String)
+
+  @Query(
+    "DELETE FROM messages WHERE conversationId = :conversationId AND createdAt >= :fromTimestamp"
+  )
+  suspend fun deleteMessagesFrom(conversationId: String, fromTimestamp: Long)
 
   @Transaction
   suspend fun restoreConversation(
@@ -67,6 +107,19 @@ interface ChatDao {
     messages: List<MessageEntity>,
   ) {
     insertConversation(conversation)
+    if (messages.isNotEmpty()) {
+      insertMessages(messages)
+    }
+  }
+
+  @Transaction
+  suspend fun importBackup(
+    conversations: List<ConversationEntity>,
+    messages: List<MessageEntity>,
+  ) {
+    if (conversations.isNotEmpty()) {
+      insertConversations(conversations)
+    }
     if (messages.isNotEmpty()) {
       insertMessages(messages)
     }

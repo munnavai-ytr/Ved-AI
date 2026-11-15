@@ -9,9 +9,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.ui.screens.ChatScreen
+import com.example.ui.screens.MemoryScreen
 import com.example.ui.screens.OnboardingScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.viewmodel.ChatViewModel
+import com.example.ui.viewmodel.MemoryViewModel
 import com.example.ui.viewmodel.SettingsViewModel
 import com.example.ui.viewmodel.VedViewModelFactory
 import kotlinx.serialization.Serializable
@@ -21,6 +23,8 @@ import kotlinx.serialization.Serializable
 @Serializable data object ChatRoute
 
 @Serializable data object SettingsRoute
+
+@Serializable data object MemoryRoute
 
 /**
  * Type-safe Compose Navigation graph for Ved.
@@ -67,6 +71,19 @@ fun VedNavHost(
       val settingsViewModel: SettingsViewModel = viewModel(factory = factory)
       SettingsScreen(
         viewModel = settingsViewModel,
+        onNavigateBack = { navController.popBackStack() },
+        onOpenMemory = {
+          navController.navigate(MemoryRoute) {
+            launchSingleTop = true
+          }
+        },
+      )
+    }
+
+    composable<MemoryRoute> {
+      val memoryViewModel: MemoryViewModel = viewModel(factory = factory)
+      MemoryScreen(
+        viewModel = memoryViewModel,
         onNavigateBack = { navController.popBackStack() },
       )
     }

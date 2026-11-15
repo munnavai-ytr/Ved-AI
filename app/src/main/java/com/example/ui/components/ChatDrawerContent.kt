@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -26,12 +27,16 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -39,7 +44,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,12 +70,15 @@ private val drawerDateFormat =
   }
 
 /**
- * Navigation drawer listing saved local Room conversations with swipe-to-delete.
+ * Navigation drawer listing saved local Room conversations with debounced search and swipe-to-delete.
  */
 @Composable
 fun ChatDrawerContent(
   conversations: List<ConversationEntity>,
   activeConversationId: String?,
+  searchQuery: String = "",
+  onSearchQueryChange: (String) -> Unit = {},
+  onClearSearch: () -> Unit = {},
   onSelectConversation: (String) -> Unit,
   onDeleteConversation: (String) -> Unit,
   onNewChat: () -> Unit,
@@ -76,6 +86,7 @@ fun ChatDrawerContent(
   modifier: Modifier = Modifier,
 ) {
   val haptic = LocalHapticFeedback.current
+  var isSearchExpanded by remember { mutableStateOf(false) }
 
   ModalDrawerSheet(
     modifier = modifier.width(308.dp),
@@ -86,7 +97,7 @@ fun ChatDrawerContent(
     ) {
       // Header
       Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
       ) {
@@ -99,6 +110,68 @@ fun ChatDrawerContent(
             color = MaterialTheme.colorScheme.onSurface,
           )
         }
+
+        IconButton(
+          onClick = {
+            if (isSearchExpanded || searchQuery.isNotEmpty()) {
+              isSearchExpanded = false
+              onClearSearch()
+            } else {
+              isSearchExpanded = true
+            }
+          },
+          modifier = Modifier.size(48.dp).testTag("drawer_search_toggle"),
+        ) {
+          Icon(
+            imageVector =
+              if (isSearchExpanded || searchQuery.isNotEmpty()) Icons.Rounded.Close
+              else Icons.Rounded.Search,
+            contentDescription = stringResource(R.string.cd_search_chats),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      }
+
+      AnimatedVisibility(visible = isSearchExpanded || searchQuery.isNotEmpty()) {
+        OutlinedTextField(
+          value = searchQuery,
+          onValueChange = onSearchQueryChange,
+          placeholder = {
+            Text(
+              text = stringResource(R.string.chat_drawer_search_placeholder),
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          },
+          leadingIcon = {
+            Icon(
+              imageVector = Icons.Rounded.Search,
+              contentDescription = null,
+              modifier = Modifier.size(20.dp),
+            )
+          },
+          trailingIcon = {
+            if (searchQuery.isNotEmpty()) {
+              IconButton(
+                onClick = onClearSearch,
+                modifier = Modifier.size(48.dp).testTag("drawer_search_clear"),
+              ) {
+                Icon(
+                  imageVector = Icons.Rounded.Close,
+                  contentDescription = stringResource(R.string.cd_clear_search),
+                  modifier = Modifier.size(18.dp),
+                )
+              }
+            }
+          },
+          singleLine = true,
+          shape = RoundedCornerShape(16.dp),
+          modifier =
+            Modifier.fillMaxWidth()
+              .padding(horizontal = 16.dp)
+              .padding(bottom = 12.dp)
+              .testTag("drawer_search_input"),
+        )
       }
 
       // New Chat button
@@ -144,14 +217,18 @@ fun ChatDrawerContent(
         ) {
           Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(
-              imageVector = Icons.Rounded.ChatBubbleOutline,
+              imageVector =
+                if (searchQuery.isNotBlank()) Icons.Rounded.Search
+                else Icons.Rounded.ChatBubbleOutline,
               contentDescription = null,
               tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
               modifier = Modifier.size(32.dp),
             )
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-              text = stringResource(R.string.chat_drawer_empty),
+              text =
+                if (searchQuery.isNotBlank()) stringResource(R.string.chat_drawer_search_empty)
+                else stringResource(R.string.chat_drawer_empty),
               style = MaterialTheme.typography.bodyMedium,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

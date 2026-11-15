@@ -1,5 +1,7 @@
 package com.example.ui.viewmodel
 
+import android.content.Context
+import android.net.Uri
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Immutable
 data class SettingsUiState(
@@ -27,6 +30,7 @@ data class SettingsUiState(
   val geminiModel: String = DefaultGeminiModels.first().id,
   val openRouterModel: String = FallbackOpenRouterModels.first().id,
   val themeMode: ThemeMode = ThemeMode.SYSTEM,
+  val systemPrompt: String = "",
   val geminiModels: List<AiModelInfo> = DefaultGeminiModels,
   val openRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
   val filteredOpenRouterModels: List<AiModelInfo> = FallbackOpenRouterModels,
@@ -35,6 +39,7 @@ data class SettingsUiState(
   val modelSearchQuery: String = "",
   val geminiKeySource: KeySource = KeySource.MISSING,
   val openRouterKeySource: KeySource = KeySource.MISSING,
+  val isBackupBusy: Boolean = false,
   val feedbackMessage: String? = null,
 ) {
   val activeModelId: String
@@ -47,7 +52,7 @@ data class SettingsUiState(
 
 /**
  * ViewModel for provider switching, dynamic OpenRouter model discovery, theme selection,
- * and Keystore-encrypted API key overrides.
+ * custom system instructions, backup export/import, and Keystore-encrypted API key overrides.
  */
 class SettingsViewModel(
   private val repository: ChatRepository,
@@ -58,6 +63,7 @@ class SettingsViewModel(
   private val _isLoadingModels = MutableStateFlow(false)
   private val _modelsError = MutableStateFlow<String?>(null)
   private val _searchQuery = MutableStateFlow("")
+  private val _isBackupBusy = MutableStateFlow(false)
   private val _feedbackMessage = MutableStateFlow<String?>(null)
 
   private val prefsFlow =
@@ -90,17 +96,21 @@ class SettingsViewModel(
       }
       .flowOn(Dispatchers.Default)
 
+  private val statusMetaFlow =
+    combine(_isBackupBusy, _feedbackMessage) { backupBusy, feedback -> backupBusy to feedback }
+
   val uiState: StateFlow<SettingsUiState> =
-    combine(prefsFlow, modelsMetaFlow, keyStatusesFlow, _feedbackMessage) {
+    combine(prefsFlow, modelsMetaFlow, keyStatusesFlow, statusMetaFlow) {
         prefs,
         catalog,
         keySources,
-        feedback ->
+        statusMeta ->
         SettingsUiState(
           activeProvider = prefs.activeProvider,
           geminiModel = prefs.geminiModel,
           openRouterModel = prefs.openRouterModel,
           themeMode = prefs.themeMode,
+          systemPrompt = prefs.systemPrompt,
           geminiModels = DefaultGeminiModels,
           openRouterModels = catalog.models,
           filteredOpenRouterModels = catalog.filteredModels,
@@ -109,7 +119,8 @@ class SettingsViewModel(
           modelSearchQuery = catalog.query,
           geminiKeySource = keySources.first,
           openRouterKeySource = keySources.second,
-          feedbackMessage = feedback,
+          isBackupBusy = statusMeta.first,
+          feedbackMessage = statusMeta.second,
         )
       }
       .stateIn(
@@ -137,6 +148,63 @@ class SettingsViewModel(
 
   fun setThemeMode(mode: ThemeMode) {
     viewModelScope.launch { preferencesRepository.setThemeMode(mode) }
+  }
+
+  fun saveSystemPrompt(prompt: String) {
+    viewModelScope.launch {
+      preferencesRepository.setSystemPrompt(prompt.trim())
+      _feedbackMessage.value = "Custom instructions saved"
+    }
+  }
+
+  fun exportBackup(context: Context, uri: Uri) {
+    if (_isBackupBusy.value) return
+    val appContext = context.applicationContext
+    viewModelScope.launch {
+      _isBackupBusy.value = true
+      val result =
+        runCatching {
+          val json = repository.exportBackupJson()
+          withContext(Dispatchers.IO) {
+            appContext.contentResolver.openOutputStream(uri)?.use { stream ->
+              stream.bufferedWriter(Charsets.UTF_8).use { writer -> writer.write(json) }
+            } ?: error("Could not open destination file for writing.")
+          }
+        }
+      _isBackupBusy.value = false
+      result
+        .onSuccess { _feedbackMessage.value = "Chat history exported successfully" }
+        .onFailure { err ->
+          _feedbackMessage.value = err.message ?: "Failed to export chat history."
+        }
+    }
+  }
+
+  fun importBackup(context: Context, uri: Uri) {
+    if (_isBackupBusy.value) return
+    val appContext = context.applicationContext
+    viewModelScope.launch {
+      _isBackupBusy.value = true
+      val result =
+        runCatching {
+          val rawJson =
+            withContext(Dispatchers.IO) {
+              appContext.contentResolver.openInputStream(uri)?.use { stream ->
+                stream.bufferedReader(Charsets.UTF_8).readText()
+              } ?: error("Could not read selected backup file.")
+            }
+          repository.importBackupJson(rawJson).getOrThrow()
+        }
+      _isBackupBusy.value = false
+      result
+        .onSuccess { summary ->
+          _feedbackMessage.value =
+            "Imported ${summary.conversationsImported} conversations (${summary.messagesImported} messages)"
+        }
+        .onFailure {
+          _feedbackMessage.value = "Invalid backup file. Please choose a valid Ved JSON export."
+        }
+    }
   }
 
   fun updateSearchQuery(query: String) {

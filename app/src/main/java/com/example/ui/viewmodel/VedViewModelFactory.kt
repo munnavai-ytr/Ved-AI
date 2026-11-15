@@ -17,6 +17,8 @@ class VedViewModelFactory(private val container: AppContainer) : ViewModelProvid
         ChatViewModel(container.chatRepository) as T
       modelClass.isAssignableFrom(SettingsViewModel::class.java) ->
         SettingsViewModel(container.chatRepository, container.preferencesRepository) as T
+      modelClass.isAssignableFrom(MemoryViewModel::class.java) ->
+        MemoryViewModel(container.chatRepository) as T
       else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
   }

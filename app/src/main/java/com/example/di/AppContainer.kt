@@ -54,7 +54,9 @@ class AppContainer(context: Context) {
 
   val chatRepository: ChatRepository by lazy {
     ChatRepository(
+      appContext = appContext,
       chatDao = database.chatDao(),
+      memoryDao = database.memoryDao(),
       streamingClient = streamingAiClient,
       openRouterApi = openRouterApi,
       apiKeyStore = apiKeyStore,

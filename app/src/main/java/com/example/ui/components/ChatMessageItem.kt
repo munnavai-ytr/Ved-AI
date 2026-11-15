@@ -1,7 +1,8 @@
 package com.example.ui.components
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,10 +14,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -25,12 +28,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -39,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.entity.MessageEntity
+import com.example.data.util.ImageProcessor
 import com.example.ui.theme.LocalVedColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
@@ -67,7 +76,8 @@ fun StreamingChatMessageItem(
 }
 
 /**
- * Renders a single user or assistant chat turn with markdown, copy, and regenerate controls.
+ * Renders a single user or assistant chat turn with markdown, image thumbnails, edit, copy,
+ * regenerate, and token usage controls.
  */
 @Composable
 fun ChatMessageItem(
@@ -76,10 +86,18 @@ fun ChatMessageItem(
   isStreaming: Boolean,
   isLastAssistantMessage: Boolean,
   onRegenerate: () -> Unit,
+  canEdit: Boolean = true,
+  onEditMessage: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   if (message.role == MessageEntity.ROLE_USER) {
-    UserMessageBubble(content = displayContent, modifier = modifier)
+    UserMessageBubble(
+      content = displayContent,
+      imageUri = message.imageUri,
+      canEdit = canEdit,
+      onEdit = onEditMessage,
+      modifier = modifier,
+    )
   } else {
     AssistantMessageBlock(
       content = displayContent,
@@ -87,6 +105,7 @@ fun ChatMessageItem(
       isError = message.isError,
       isStreaming = isStreaming,
       canRegenerate = isLastAssistantMessage && !isStreaming,
+      completionTokens = message.completionTokens,
       onRegenerate = onRegenerate,
       modifier = modifier,
     )
@@ -94,31 +113,91 @@ fun ChatMessageItem(
 }
 
 @Composable
-private fun UserMessageBubble(content: String, modifier: Modifier = Modifier) {
+private fun UserMessageBubble(
+  content: String,
+  imageUri: String?,
+  canEdit: Boolean,
+  onEdit: (() -> Unit)?,
+  modifier: Modifier = Modifier,
+) {
   val clipboard = LocalClipboardManager.current
   val haptic = LocalHapticFeedback.current
   val vedColors = LocalVedColors.current
 
-  Box(
+  Column(
     modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-    contentAlignment = Alignment.CenterEnd,
+    horizontalAlignment = Alignment.End,
   ) {
     Surface(
       onClick = {
-        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-        clipboard.setText(AnnotatedString(content))
+        if (content.isNotBlank()) {
+          haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+          clipboard.setText(AnnotatedString(content))
+        }
       },
       shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 6.dp),
       color = vedColors.userBubble,
       modifier = Modifier.widthIn(max = 310.dp),
     ) {
-      Text(
-        text = content,
-        style = MaterialTheme.typography.bodyLarge,
-        color = vedColors.onUserBubble,
+      Column(
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-      )
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        if (!imageUri.isNullOrBlank()) {
+          MessageImageThumbnail(uriString = imageUri)
+        }
+        if (content.isNotBlank()) {
+          Text(
+            text = content,
+            style = MaterialTheme.typography.bodyLarge,
+            color = vedColors.onUserBubble,
+          )
+        }
+      }
     }
+
+    if (onEdit != null) {
+      IconButton(
+        onClick = {
+          haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+          onEdit()
+        },
+        enabled = canEdit,
+        modifier = Modifier.size(48.dp).testTag("edit_message_button"),
+      ) {
+        Icon(
+          imageVector = Icons.Outlined.Edit,
+          contentDescription = stringResource(R.string.cd_edit_message),
+          tint =
+            if (canEdit) MaterialTheme.colorScheme.onSurfaceVariant
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+          modifier = Modifier.size(16.dp),
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun MessageImageThumbnail(uriString: String) {
+  val context = LocalContext.current
+  val bitmap by
+    produceState<Bitmap?>(initialValue = null, key1 = uriString) {
+      value = ImageProcessor.loadThumbnailBitmap(context, uriString, maxPx = 640)
+    }
+
+  val loaded = bitmap
+  if (loaded != null) {
+    Image(
+      bitmap = loaded.asImageBitmap(),
+      contentDescription = stringResource(R.string.cd_attached_image),
+      contentScale = ContentScale.Crop,
+      modifier =
+        Modifier.fillMaxWidth()
+          .heightIn(max = 220.dp)
+          .clip(RoundedCornerShape(12.dp))
+          .testTag("user_message_image"),
+    )
   }
 }
 
@@ -129,6 +208,7 @@ private fun AssistantMessageBlock(
   isError: Boolean,
   isStreaming: Boolean,
   canRegenerate: Boolean,
+  completionTokens: Int?,
   onRegenerate: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
@@ -200,9 +280,10 @@ private fun AssistantMessageBlock(
       )
     }
 
-    // Message actions
+    // Message actions & token usage indicator
     if (!isStreaming && content.isNotBlank()) {
       Row(
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
       ) {
@@ -247,6 +328,16 @@ private fun AssistantMessageBlock(
               style = MaterialTheme.typography.labelMedium,
             )
           }
+        }
+
+        if (completionTokens != null && completionTokens > 0) {
+          Spacer(modifier = Modifier.weight(1f))
+          Text(
+            text = stringResource(R.string.message_tokens_count, completionTokens),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            modifier = Modifier.padding(end = 4.dp).testTag("message_token_count"),
+          )
         }
       }
     }
