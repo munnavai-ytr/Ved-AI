@@ -47,6 +47,7 @@ import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Mic
@@ -149,7 +150,7 @@ fun ChatInputBar(
       }
 
       Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(26.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 4.dp,
         shadowElevation = 6.dp,
@@ -279,9 +280,41 @@ fun ChatInputBar(
           }
         }
 
+        // Top Row: Multi-line text input field alone, full width
+        Box(
+          modifier =
+            Modifier.fillMaxWidth()
+              .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+          contentAlignment = Alignment.TopStart,
+        ) {
+          if (text.isEmpty()) {
+            Text(
+              text = stringResource(R.string.chat_input_placeholder),
+              style = MaterialTheme.typography.bodyLarge,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+          BasicTextField(
+            value = text,
+            onValueChange = onTextChange,
+            textStyle =
+              MaterialTheme.typography.bodyLarge.copy(
+                color = MaterialTheme.colorScheme.onSurface
+              ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            maxLines = 8,
+            keyboardOptions =
+              KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+            modifier = Modifier.fillMaxWidth().testTag("chat_input_field"),
+          )
+        }
+
+        // Bottom Row: "+" attachment on left; mic and send/stop on right
         Row(
-          modifier = Modifier.padding(start = 6.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-          verticalAlignment = Alignment.Bottom,
+          modifier =
+            Modifier.fillMaxWidth()
+              .padding(start = 8.dp, end = 10.dp, top = 2.dp, bottom = 8.dp),
+          verticalAlignment = Alignment.CenterVertically,
         ) {
           Box {
             IconButton(
@@ -294,15 +327,15 @@ fun ChatInputBar(
                 }
               },
               enabled = !isGenerating,
-              modifier = Modifier.size(48.dp).testTag("attach_files_button"),
+              modifier = Modifier.size(42.dp).testTag("attach_files_button"),
             ) {
               Icon(
-                imageVector = Icons.Outlined.AttachFile,
+                imageVector = Icons.Rounded.Add,
                 contentDescription = stringResource(R.string.cd_attach_files),
                 tint =
                   if (isGeminiActive && !isGenerating) MaterialTheme.colorScheme.onSurfaceVariant
                   else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(24.dp),
               )
             }
 
@@ -350,101 +383,62 @@ fun ChatInputBar(
             }
           }
 
-          VoiceMicIconButton(
-            isListening = isListening,
-            enabled = !isGenerating,
-            onClick = {
-              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-              onVoiceInputClick()
-            },
-          )
+          Spacer(modifier = Modifier.weight(1f))
 
-          if (hasEnabledSkills && pinnedSkill == null) {
-            IconButton(
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            VoiceMicIconButton(
+              isListening = isListening,
+              enabled = !isGenerating,
               onClick = {
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                onOpenSkillPicker()
+                onVoiceInputClick()
               },
-              enabled = !isGenerating,
-              modifier = Modifier.size(48.dp).testTag("select_skill_button"),
-            ) {
-              Icon(
-                imageVector = Icons.Outlined.AutoAwesome,
-                contentDescription = stringResource(R.string.cd_select_skill),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-              )
-            }
-          }
-
-          Box(
-            modifier = Modifier.weight(1f).padding(vertical = 10.dp, horizontal = 4.dp),
-            contentAlignment = Alignment.CenterStart,
-          ) {
-            if (text.isEmpty()) {
-              Text(
-                text = stringResource(R.string.chat_input_placeholder),
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
-            BasicTextField(
-              value = text,
-              onValueChange = onTextChange,
-              textStyle =
-                MaterialTheme.typography.bodyLarge.copy(
-                  color = MaterialTheme.colorScheme.onSurface
-                ),
-              cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-              maxLines = 5,
-              keyboardOptions =
-                KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-              modifier = Modifier.fillMaxWidth().testTag("chat_input_field"),
             )
-          }
 
-          Spacer(modifier = Modifier.width(6.dp))
-
-          FilledIconButton(
-            onClick = {
-              haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-              if (isGenerating) onStop() else onSend()
-            },
-            enabled = isGenerating || canSend,
-            shape = CircleShape,
-            colors =
-              IconButtonDefaults.filledIconButtonColors(
-                containerColor =
-                  if (isGenerating) MaterialTheme.colorScheme.errorContainer
-                  else MaterialTheme.colorScheme.primary,
-                contentColor =
-                  if (isGenerating) MaterialTheme.colorScheme.error
-                  else MaterialTheme.colorScheme.onPrimary,
-                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-              ),
-            modifier = Modifier.size(48.dp).testTag("send_or_stop_button"),
-          ) {
-            AnimatedContent(
-              targetState = isGenerating,
-              transitionSpec = {
-                (fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.85f)) togetherWith
-                  (fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.85f))
+            FilledIconButton(
+              onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                if (isGenerating) onStop() else onSend()
               },
-              label = "send_stop_morph",
-            ) { streaming ->
-              if (streaming) {
-                Icon(
-                  imageVector = Icons.Rounded.Stop,
-                  contentDescription = stringResource(R.string.cd_stop_generation),
-                  modifier = Modifier.size(22.dp),
-                )
-              } else {
-                Icon(
-                  imageVector = Icons.Rounded.ArrowUpward,
-                  contentDescription = stringResource(R.string.cd_send_message),
-                  modifier = Modifier.size(22.dp),
-                )
+              enabled = isGenerating || canSend,
+              shape = CircleShape,
+              colors =
+                IconButtonDefaults.filledIconButtonColors(
+                  containerColor =
+                    if (isGenerating) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.primary,
+                  contentColor =
+                    if (isGenerating) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onPrimary,
+                  disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                  disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                ),
+              modifier = Modifier.size(42.dp).testTag("send_or_stop_button"),
+            ) {
+              AnimatedContent(
+                targetState = isGenerating,
+                transitionSpec = {
+                  (fadeIn(tween(150)) + scaleIn(tween(150), initialScale = 0.85f)) togetherWith
+                    (fadeOut(tween(120)) + scaleOut(tween(120), targetScale = 0.85f))
+                },
+                label = "send_stop_morph",
+              ) { streaming ->
+                if (streaming) {
+                  Icon(
+                    imageVector = Icons.Rounded.Stop,
+                    contentDescription = stringResource(R.string.cd_stop_generation),
+                    modifier = Modifier.size(20.dp),
+                  )
+                } else {
+                  Icon(
+                    imageVector = Icons.Rounded.ArrowUpward,
+                    contentDescription = stringResource(R.string.cd_send_message),
+                    modifier = Modifier.size(20.dp),
+                  )
+                }
               }
             }
           }
@@ -666,7 +660,7 @@ private fun VoiceMicIconButton(
   IconButton(
     onClick = onClick,
     enabled = enabled,
-    modifier = Modifier.size(48.dp).testTag("mic_input_button"),
+    modifier = Modifier.size(42.dp).testTag("mic_input_button"),
   ) {
     if (isListening) {
       val pulseTransition = rememberInfiniteTransition(label = "mic_pulse")

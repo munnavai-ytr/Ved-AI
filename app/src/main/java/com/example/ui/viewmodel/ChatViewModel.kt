@@ -74,6 +74,7 @@ data class ChatUiState(
   val createdSkillId: String? = null,
   val createdSkillName: String? = null,
   val createdSkillMessageId: String? = null,
+  val voiceInputLanguage: String = "system",
 ) {
   val pinnedSkill: SkillEntity?
     get() = pinnedSkillId?.let { id -> enabledSkills.firstOrNull { it.id == id } }
@@ -329,6 +330,7 @@ class ChatViewModel(
           createdSkillId = createdBanner?.skillId,
           createdSkillName = createdBanner?.skillName,
           createdSkillMessageId = createdBanner?.messageId,
+          voiceInputLanguage = engineMeta.prefs.voiceInputLanguage,
         )
       }
       .stateIn(

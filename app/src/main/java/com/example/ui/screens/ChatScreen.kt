@@ -154,9 +154,10 @@ fun ChatScreen(
   var micPermissionDeniedInSession by remember { mutableStateOf(false) }
 
   val voiceController =
-    remember(context) {
+    remember(context, uiState.voiceInputLanguage) {
       VoiceInputController(
         context = context,
+        voiceInputLanguage = uiState.voiceInputLanguage,
         onFinalText = { transcript -> viewModel.appendVoiceTranscript(transcript) },
         onErrorMessage = { message ->
           scope.launch { snackbarHostState.showSnackbar(message) }

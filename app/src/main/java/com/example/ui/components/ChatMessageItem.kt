@@ -628,8 +628,8 @@ private fun ThinkingIndicator(
       AnimatedContent(
         targetState = liveStatus,
         transitionSpec = {
-          (fadeIn(tween(180)) + slideInVertically(tween(180)) { it / 3 }) togetherWith
-            (fadeOut(tween(140)) + slideOutVertically(tween(140)) { -it / 3 })
+          (fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 4 }) togetherWith
+            (fadeOut(tween(150)) + slideOutVertically(tween(150)) { -it / 4 })
         },
         label = "thinking_live_status",
         modifier = Modifier.weight(1f, fill = false),

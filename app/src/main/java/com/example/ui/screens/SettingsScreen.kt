@@ -198,6 +198,33 @@ fun SettingsScreen(
           }
         }
 
+        // Voice input language
+        item {
+          SettingsSectionCard(title = stringResource(R.string.settings_voice_language_title)) {
+            val languages =
+              listOf(
+                "system" to stringResource(R.string.settings_voice_language_system),
+                "bn-BD" to stringResource(R.string.settings_voice_language_bengali),
+                "en-US" to stringResource(R.string.settings_voice_language_english),
+              )
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+              languages.forEachIndexed { index, (tag, label) ->
+                SegmentedButton(
+                  selected = uiState.voiceInputLanguage == tag,
+                  onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    viewModel.setVoiceInputLanguage(tag)
+                  },
+                  shape = SegmentedButtonDefaults.itemShape(index = index, count = languages.size),
+                  modifier = Modifier.testTag("voice_lang_$tag"),
+                ) {
+                  Text(text = label, maxLines = 1)
+                }
+              }
+            }
+          }
+        }
+
         // 2. AI Engine & Model Selection
         item {
           SettingsSectionCard(title = stringResource(R.string.settings_engine_section)) {

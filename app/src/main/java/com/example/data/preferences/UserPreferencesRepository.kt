@@ -29,6 +29,7 @@ data class UserPreferences(
   val onboardingCompleted: Boolean = false,
   val systemPrompt: String = "",
   val showSuggestedReplies: Boolean = true,
+  val voiceInputLanguage: String = "system",
 ) {
   val activeModelId: String
     get() =
@@ -53,6 +54,7 @@ class UserPreferencesRepository(private val context: Context) {
         onboardingCompleted = prefs[KEY_ONBOARDING_COMPLETED] ?: false,
         systemPrompt = prefs[KEY_SYSTEM_PROMPT] ?: "",
         showSuggestedReplies = prefs[KEY_SHOW_SUGGESTED_REPLIES] ?: true,
+        voiceInputLanguage = prefs[KEY_VOICE_INPUT_LANGUAGE] ?: "system",
       )
     }
 
@@ -84,6 +86,10 @@ class UserPreferencesRepository(private val context: Context) {
     context.vedDataStore.edit { it[KEY_SHOW_SUGGESTED_REPLIES] = enabled }
   }
 
+  suspend fun setVoiceInputLanguage(lang: String) {
+    context.vedDataStore.edit { it[KEY_VOICE_INPUT_LANGUAGE] = lang }
+  }
+
   private companion object {
     val KEY_ACTIVE_PROVIDER = stringPreferencesKey("active_provider")
     val KEY_GEMINI_MODEL = stringPreferencesKey("gemini_model")
@@ -92,5 +98,6 @@ class UserPreferencesRepository(private val context: Context) {
     val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
     val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
     val KEY_SHOW_SUGGESTED_REPLIES = booleanPreferencesKey("show_suggested_replies")
+    val KEY_VOICE_INPUT_LANGUAGE = stringPreferencesKey("voice_input_language")
   }
 }

@@ -44,6 +44,7 @@ data class SettingsUiState(
   val enabledSkillsCount: Int = 0,
   val totalSkillsCount: Int = 0,
   val showSuggestedReplies: Boolean = true,
+  val voiceInputLanguage: String = "system",
   val isBackupBusy: Boolean = false,
   val feedbackMessage: String? = null,
 ) {
@@ -156,6 +157,7 @@ class SettingsViewModel(
           enabledSkillsCount = statusMeta.enabledSkillsCount,
           totalSkillsCount = statusMeta.totalSkillsCount,
           showSuggestedReplies = prefs.showSuggestedReplies,
+          voiceInputLanguage = prefs.voiceInputLanguage,
           isBackupBusy = statusMeta.isBackupBusy,
           feedbackMessage = statusMeta.feedbackMessage,
         )
@@ -195,6 +197,10 @@ class SettingsViewModel(
 
   fun setShowSuggestedReplies(enabled: Boolean) {
     viewModelScope.launch { preferencesRepository.setShowSuggestedReplies(enabled) }
+  }
+
+  fun setVoiceInputLanguage(lang: String) {
+    viewModelScope.launch { preferencesRepository.setVoiceInputLanguage(lang) }
   }
 
   fun saveSystemPrompt(prompt: String) {

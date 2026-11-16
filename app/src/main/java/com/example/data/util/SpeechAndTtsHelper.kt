@@ -8,6 +8,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import androidx.core.os.ConfigurationCompat
 import com.example.R
 import java.util.Locale
@@ -34,10 +35,12 @@ object SpeechAndTtsUtils {
   }
 
   /**
-   * Resolves the best recognition language tag prioritizing Bengali or English based on the
-   * device's active input/system locale.
+   * Resolves the best recognition language tag prioritizing user preference or system locale.
    */
-  fun resolveSpeechLocaleTag(context: Context): String {
+  fun resolveSpeechLocaleTag(context: Context, userPreferenceTag: String = "system"): String {
+    if (userPreferenceTag.isNotBlank() && userPreferenceTag != "system" && userPreferenceTag != "system_default") {
+      return userPreferenceTag
+    }
     val configLocale =
       ConfigurationCompat.getLocales(context.resources.configuration)[0] ?: Locale.getDefault()
     val lang = configLocale.language.lowercase()
@@ -116,6 +119,7 @@ object SpeechAndTtsUtils {
  */
 class VoiceInputController(
   private val context: Context,
+  private val voiceInputLanguage: String = "system",
   private val onFinalText: (String) -> Unit,
   private val onErrorMessage: (String) -> Unit,
 ) {
@@ -148,7 +152,7 @@ class VoiceInputController(
               speechRecognizer = created
             }
 
-        val localeTag = SpeechAndTtsUtils.resolveSpeechLocaleTag(appContext)
+        val localeTag = SpeechAndTtsUtils.resolveSpeechLocaleTag(appContext, voiceInputLanguage)
         val intent =
           Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
@@ -159,7 +163,9 @@ class VoiceInputController(
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, localeTag)
             putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES, arrayOf("bn-BD", "en-US"))
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
           }
         _isListening.value = true
         recognizer.startListening(intent)
@@ -199,6 +205,7 @@ class VoiceInputController(
 
       override fun onError(error: Int) {
         _isListening.value = false
+        Log.e("VoiceInputController", "Speech recognition error code: $error")
         val message =
           when (error) {
             SpeechRecognizer.ERROR_NO_MATCH,
@@ -214,9 +221,18 @@ class VoiceInputController(
       override fun onResults(results: Bundle?) {
         _isListening.value = false
         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        val confidenceScores =
+          results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+            ?: results?.getFloatArray("confidence_scores")
+
         val best = matches?.firstOrNull()?.trim().orEmpty()
+        val topConfidence = confidenceScores?.firstOrNull() ?: 1.0f
+
         if (best.isBlank()) {
           onErrorMessage(appContext.getString(R.string.chat_speech_no_match))
+        } else if (confidenceScores != null && confidenceScores.isNotEmpty() && topConfidence < 0.25f) {
+          Log.w("VoiceInputController", "Discarding low confidence speech recognition result: score=$topConfidence, text=$best")
+          onErrorMessage(appContext.getString(R.string.chat_speech_low_confidence))
         } else {
           onFinalText(best)
         }

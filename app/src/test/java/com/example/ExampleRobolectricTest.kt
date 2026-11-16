@@ -2437,4 +2437,89 @@ class ExampleRobolectricTest {
       .onNodeWithText("Add a composite index on (conversationId, createdAt).", substring = true)
       .assertIsDisplayed()
   }
+
+  @Test
+  fun `speech locale resolver prioritizes user preference over system locale`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // Explicit preferences
+    assertEquals("bn-BD", SpeechAndTtsUtils.resolveSpeechLocaleTag(context, "bn-BD"))
+    assertEquals("en-US", SpeechAndTtsUtils.resolveSpeechLocaleTag(context, "en-US"))
+
+    // System preference falls back to standard locale tag
+    val systemResolved = SpeechAndTtsUtils.resolveSpeechLocaleTag(context, "system")
+    assertTrue(systemResolved.isNotBlank())
+    assertTrue(systemResolved == "en-US" || systemResolved == "bn-BD" || systemResolved.contains("-"))
+  }
+
+  @Test
+  fun `user preferences repository stores and observes voice input language`() = runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val prefsRepo = UserPreferencesRepository(context)
+
+    // Default is "system"
+    assertEquals("system", prefsRepo.preferencesFlow.first().voiceInputLanguage)
+
+    // Update to Bengali
+    prefsRepo.setVoiceInputLanguage("bn-BD")
+    assertEquals("bn-BD", prefsRepo.preferencesFlow.first().voiceInputLanguage)
+
+    // Update to English
+    prefsRepo.setVoiceInputLanguage("en-US")
+    assertEquals("en-US", prefsRepo.preferencesFlow.first().voiceInputLanguage)
+
+    // Reset to system
+    prefsRepo.setVoiceInputLanguage("system")
+    assertEquals("system", prefsRepo.preferencesFlow.first().voiceInputLanguage)
+  }
+
+  @Test
+  fun `chat input bar renders redesigned claude-style 2-row layout with plus button, mic, and send`() {
+    val inputText = MutableStateFlow("")
+    var sendClicked = false
+    var micClicked = false
+    var attachClicked = false
+
+    composeTestRule.setContent {
+      val text by inputText.collectAsState()
+      VedTheme(themeMode = ThemeMode.DARK) {
+        ChatInputBar(
+          text = text,
+          onTextChange = { inputText.value = it },
+          isGenerating = false,
+          onSend = { sendClicked = true },
+          onStop = {},
+          isListening = false,
+          onVoiceInputClick = { micClicked = true },
+          pendingAttachments = emptyList(),
+          onAttachFilesClick = { attachClicked = true },
+          onRemoveAttachment = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    // Verify top-row input field exists
+    composeTestRule.onNodeWithTag("chat_input_field").assertIsDisplayed()
+
+    // Verify bottom-row unified '+' attach button, mic button, and send/stop button exist
+    composeTestRule.onNodeWithTag("attach_files_button").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("mic_input_button").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("send_or_stop_button").assertIsDisplayed()
+
+    // Standalone skill sparkle button is no longer in the main bar row
+    assertTrue(
+      composeTestRule.onAllNodes(hasTestTag("skill_selector_button")).fetchSemanticsNodes().isEmpty()
+    )
+
+    // Click mic button
+    composeTestRule.onNodeWithTag("mic_input_button").performClick()
+    assertTrue(micClicked)
+
+    // Type text and verify send button can be triggered
+    inputText.value = "Tell me about quantum computing"
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("send_or_stop_button").performClick()
+    assertTrue(sendClicked)
+  }
 }
